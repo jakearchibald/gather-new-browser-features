@@ -1,9 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Edit(.claude/skills/wpt-release-notes/**)",
       "Bash(node scripts/*)",
-      "Bash(mkdir -p tmp)"
+      "Bash(mkdir -p tmp)",
+      "Edit(/.claude/skills/wpt-release-notes/**)",
+      "Bash(awk '/^## /{if\\(n\\)print \"  \"n\" \"s; s=$0; n=0} {n++} END{print \"  \"n\" \"s}' .claude/skills/wpt-release-notes/SKILL.md)"
     ]
   }
 }

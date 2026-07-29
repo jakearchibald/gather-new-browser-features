@@ -13,6 +13,15 @@
  *   chrome@stable         latest stable Chrome
  *   safari@experimental   latest Safari Technology Preview
  *   firefox               latest Firefox run on any channel
+ *   firefox@stable@152    newest complete Firefox 152.x stable run
+ *   firefox@stable@152.0.6  newest complete run of exactly that version
+ *
+ * A numeric segment is treated as a browser version. Use this for release notes
+ * between shipped versions: once 153 is stable, "stable" no longer resolves to
+ * 152, so the baseline has to be pinned by version. Keep the channel too —
+ * nightly runs outnumber stable ones by ~50:1, so an unlabelled version search
+ * will not reach back far enough. Version pins are incompatible with --aligned
+ * (different versions are tested at different WPT revisions).
  *
  * Cross-browser comparison works too: --from chrome@stable --to firefox@nightly
  *
@@ -21,7 +30,16 @@
  *                   defaults to tmp/<from>-vs-<to>.diff.json (tmp/ is gitignored).
  *   --min-delta <n> hide printed regression/improvement rows below n subtests
  *                   (default 1). Affects the printed report only; --json is complete.
- *   --top <n>       how many rows to print per section (default 40)
+ *   --top <n>       how many rows to print per section (default 40). Does not
+ *                   apply to the "Directory clusters" section, which always
+ *                   prints in full — that section exists to catch what ranking
+ *                   by magnitude hides, so truncating it by rank defeats it.
+ *   --cluster-min <n>
+ *                   min moved files for a directory to count as a cluster
+ *                   (default 4, min 1). Lower it to sweep for smaller features.
+ *   --cluster-ratio <r>
+ *                   how one-sided a cluster must be, 0-1 (default 0.8). Lower it
+ *                   to see directories that moved both ways.
  *   --aligned       require both runs to be on the same WPT revision, removing
  *                   test-suite churn from the diff (may select older runs)
  *
@@ -40,6 +58,13 @@ const TMP_DIR = require('path').join(__dirname, '..', 'tmp');
 
 // How many recent runs to consider when looking for a complete one.
 const RUN_CANDIDATES = 5;
+// A version-pinned spec has to look further back, since a shipped version may
+// be weeks of runs behind the newest.
+const VERSION_RUN_CANDIDATES = 200;
+// How many candidate summaries to actually download before giving up. Separate
+// from the search window above: widening the search is one cheap /api/runs call,
+// but every probe is a ~20MB summary.
+const MAX_SUMMARY_PROBES = 5;
 // A full WPT run is ~120k test files. Anything far below this is a partial run
 // that would otherwise yield a diff claiming every test was removed.
 const MIN_TESTS = 10000;
@@ -77,22 +102,40 @@ function parseSpec(spec) {
     // Bare "nightly"/"beta"/"stable" — assume firefox.
     spec = `firefox@${lower}`;
   }
-  const [product, rawChannel] = spec.split('@');
-  if (!product) throw new Error(`Invalid spec: "${spec}" (expected "product[@channel]")`);
-  if (rawChannel !== undefined && !rawChannel) {
-    throw new Error(
-      `Invalid spec: "${spec}" — trailing "@" with no channel. ` +
-        `Drop the "@" to accept any channel.`,
-    );
+  const parts = spec.split('@');
+  const product = parts[0];
+  if (!product) throw new Error(`Invalid spec: "${spec}" (expected "product[@channel][@version]")`);
+  if (parts.length > 3) {
+    throw new Error(`Invalid spec: "${spec}" (expected "product[@channel][@version]")`);
   }
+  for (const p of parts.slice(1)) {
+    if (!p) {
+      throw new Error(
+        `Invalid spec: "${spec}" — empty segment after "@". ` +
+          `Drop the "@" to accept any channel.`,
+      );
+    }
+  }
+
+  // A numeric segment is a browser version, e.g. firefox@152 or
+  // firefox@stable@152.0.6. Release notes compare shipped versions, and by the
+  // time 153 is stable the "stable" label no longer resolves to 152 — so the
+  // version has to be pinned. The channel label still matters: nightly runs
+  // outnumber stable ones ~50:1, so an unlabelled version search never reaches
+  // back far enough.
+  const rest = parts.slice(1);
+  const version = rest.find((p) => /^\d/.test(p)) || null;
+  const rawChannel = rest.find((p) => !/^\d/.test(p)) || null;
+
   const channel = rawChannel
     ? CHANNEL_ALIASES[rawChannel.toLowerCase()] || rawChannel.toLowerCase()
     : null;
-  return {
-    product,
-    channel,
-    label: channel ? `${product}@${channel}` : product,
-  };
+
+  let label = product;
+  if (channel) label += `@${channel}`;
+  if (version) label += ` ${version}`;
+
+  return { product, channel, version, label };
 }
 
 function parseArgs(argv) {
@@ -102,6 +145,8 @@ function parseArgs(argv) {
     json: null,
     minDelta: 1,
     top: 40,
+    clusterMin: 4,
+    clusterRatio: 0.8,
     aligned: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -130,6 +175,20 @@ function parseArgs(argv) {
         break;
       case '--min-delta': opts.minDelta = num(); break;
       case '--top': opts.top = num(); break;
+      case '--cluster-min': {
+        opts.clusterMin = num();
+        // 0 would disable both cluster filters and print every ancestor
+        // directory of every changed file, in a section that never truncates.
+        if (opts.clusterMin < 1) throw new Error('--cluster-min must be at least 1');
+        break;
+      }
+      case '--cluster-ratio': {
+        opts.clusterRatio = num();
+        if (opts.clusterRatio <= 0 || opts.clusterRatio > 1) {
+          throw new Error('--cluster-ratio must be greater than 0 and at most 1');
+        }
+        break;
+      }
       case '--aligned': opts.aligned = true; break;
       case '-h':
       case '--help':
@@ -172,10 +231,38 @@ async function latestRun(spec) {
   // wpt.fyi (a real nightly once published only 2 tests), and picking one
   // silently produces a diff where every test looks "removed". Callers verify
   // the summary size and fall back to the next candidate.
-  const params = new URLSearchParams({ product: spec.product, 'max-count': String(RUN_CANDIDATES) });
+  // A pinned version may be many runs back (152.0.6 was ~6 weeks of nightlies
+  // ago), so widen the window and filter, rather than taking the newest few.
+  const wanted = spec.version ? VERSION_RUN_CANDIDATES : RUN_CANDIDATES;
+  const params = new URLSearchParams({ product: spec.product, 'max-count': String(wanted) });
   if (spec.channel) params.set('label', spec.channel);
-  const runs = await getJSON(`https://wpt.fyi/api/runs?${params}`);
-  if (!runs.length) throw new Error(`No runs found for "${spec.label}"`);
+  let runs = await getJSON(`https://wpt.fyi/api/runs?${params}`);
+  if (spec.version) {
+    // Prefix match on a dot boundary so "152" means the 152 series (152.0.6),
+    // not 1520, while "152.0.6" stays exact.
+    const v = spec.version;
+    runs = runs.filter((r) => {
+      const bv = r.browser_version || '';
+      return bv === v || bv.startsWith(`${v}.`);
+    });
+  }
+  if (!runs.length) {
+    if (spec.version && !spec.channel) {
+      // The commonest way a version pin fails. Nightly runs outnumber stable
+      // ones ~50:1, so an unlabelled search burns its whole window on nightlies
+      // and never reaches a shipped version.
+      throw new Error(
+        `No runs found for "${spec.label}" in the last ${wanted} ${spec.product} runs.\n` +
+          `Add the channel the version shipped on — "${spec.product}@stable@${spec.version}" ` +
+          `rather than "${spec.product}@${spec.version}". Without a channel the search is ` +
+          `dominated by nightlies and does not reach back far enough.`,
+      );
+    }
+    throw new Error(
+      `No runs found for "${spec.label}"` +
+        (spec.version ? ` in the last ${wanted} ${spec.label.replace(/ .*/, '')} runs` : ''),
+    );
+  }
   return runs;
 }
 
@@ -183,10 +270,22 @@ async function latestRun(spec) {
  * Take the most recent run whose summary looks complete, i.e. has at least
  * MIN_TESTS test files. Candidates are tried newest-first and the summary is
  * downloaded lazily, so a complete latest run costs one fetch.
+ *
+ * The candidate list can be long — a version pin searches VERSION_RUN_CANDIDATES
+ * runs and may match dozens — but each probe downloads a ~20MB summary, so the
+ * number of probes is capped separately from the size of the search window.
  */
 async function firstUsableRun(spec, runs) {
   const errors = [];
+  let probes = 0;
   for (const [i, run] of runs.entries()) {
+    if (probes >= MAX_SUMMARY_PROBES) {
+      errors.push(
+        `stopped after ${probes} summary download(s); ${runs.length - i} candidate(s) untried`,
+      );
+      break;
+    }
+    probes++;
     let summary;
     try {
       summary = await fetchSummary(run);
@@ -206,7 +305,7 @@ async function firstUsableRun(spec, runs) {
     errors.push(`run ${run.id} (${run.time_start}): only ${summary.size} tests — partial run`);
   }
   throw new Error(
-    `No complete ${spec.label} run found in the last ${runs.length} runs ` +
+    `No complete ${spec.label} run found among ${runs.length} candidate run(s) ` +
       `(expected >= ${MIN_TESTS} test files):\n  ${errors.join('\n  ')}`,
   );
 }
@@ -222,6 +321,19 @@ async function firstUsableRun(spec, runs) {
  * them, which works for any combination.
  */
 async function alignedRuns(fromSpec, toSpec, maxCount = 100) {
+  // Two different shipped versions are never tested at the same WPT revision,
+  // so an aligned version-to-version comparison cannot exist. Fail loudly
+  // instead of silently ignoring the pin and diffing the wrong runs.
+  for (const spec of [fromSpec, toSpec]) {
+    if (spec.version) {
+      throw new Error(
+        `--aligned cannot be used with the version-pinned spec "${spec.label}": ` +
+          `distinct browser versions are tested at distinct WPT revisions. ` +
+          `Re-run without --aligned and treat small single-subtest deltas as ` +
+          `possible test-suite churn.`,
+      );
+    }
+  }
   const shaList = async (spec) => {
     const params = new URLSearchParams({ product: spec.product, 'max-count': String(maxCount) });
     if (spec.channel) params.set('label', spec.channel);
@@ -284,6 +396,89 @@ async function fetchSummary(run) {
     }
   }
   return out;
+}
+
+/**
+ * Find directories where many test files moved the same way.
+ *
+ * Every other view ranks by magnitude — the sections print the top N by subtest
+ * delta, the rollup sums into a shallow bucket (`html`, `third_party`) — so a
+ * feature whose tests are numerous but individually tiny is invisible to all of
+ * them. 13 files under the-select-element/customizable-select/ moved +1 or +3
+ * each, summing to +22 inside `html`'s +453, and a shipped feature was missed.
+ *
+ * So rank by cluster *shape*: how many files in one directory moved, and how
+ * one-sided that movement was. That does not depend on subtest counts.
+ *
+ * Nothing is excluded by path. test262 forms large one-sided clusters by
+ * construction, which is tempting to filter out and is exactly the wrong call —
+ * that is where JS and Intl features live, and its area rollup line
+ * ("+118 subtests third_party") names nothing. Excluding it hides the clearest
+ * signal in the diff: 40 files under intl402/Locale/prototype, all 0/1 -> 1/1.
+ */
+function findClusters(rows, minFiles, oneSidedRatio) {
+  const clusters = new Map();
+  for (const r of rows) {
+    // A test present on only one side is test-suite churn from differing WPT
+    // revisions, not browser movement. Counting it produced a top-5 "cluster"
+    // for /svg/geometry/parsing, whose 23 files were 23 brand-new tests.
+    const churn = r.kind === 'added' || r.kind === 'removed';
+    const forward =
+      !churn && (r.deltaPass > 0 || r.statusDirection === 'fixed' || r.kind === 'newly-running');
+    const backward =
+      !churn && (r.deltaPass < 0 || r.statusDirection === 'broken' || r.kind === 'newly-broken');
+    const parts = r.test.replace(/^\//, '').split('/');
+    // Credit every ancestor directory, so a cluster surfaces at whatever depth
+    // it actually lives at rather than a depth hardcoded here.
+    for (let depth = 1; depth < parts.length; depth++) {
+      const dir = parts.slice(0, depth).join('/');
+      if (!clusters.has(dir)) {
+        clusters.set(dir, { dir, depth, paths: new Set(), churn: 0, improved: 0, regressed: 0, deltaPass: 0 });
+      }
+      const c = clusters.get(dir);
+      if (churn) { c.churn++; continue; }
+      c.paths.add(r.test);
+      c.deltaPass += r.deltaPass;
+      if (forward) c.improved++;
+      else if (backward) c.regressed++;
+    }
+  }
+
+  const candidates = [...clusters.values()]
+    .map((c) => ({ ...c, moved: c.paths.size }))
+    .filter((c) => c.moved >= minFiles)
+    // One-sided: most files moved the same way. A directory where things broke
+    // about as often as they were fixed is noise, not a feature landing.
+    .filter((c) => {
+      const dominant = Math.max(c.improved, c.regressed);
+      return dominant >= oneSidedRatio * c.moved && dominant >= minFiles;
+    })
+    .sort((a, b) => b.depth - a.depth);
+
+  // Keep the most specific naming of a cluster: drop a directory once the
+  // clusters already kept beneath it cover >=70% of its moved files, because
+  // they say the same thing with better names. Deepest-first, so a descendant's
+  // fate is settled before its ancestor is judged.
+  //
+  // This handles both shapes of redundancy. A single dominant child collapses a
+  // chain (semantics -> forms -> the-select-element -> customizable-select to
+  // just the leaf). Many scattered children collapse a vague top-level row:
+  // "/css, 136 files improved" is not a lead, and the area rollup above already
+  // says it. A directory whose children do *not* cover it survives, which is why
+  // /IndexedDB (28 concentrated files) still appears.
+  const kept = [];
+  for (const c of candidates) {
+    const covered = new Set();
+    for (const o of kept) {
+      if (!o.dir.startsWith(`${c.dir}/`)) continue;
+      for (const p of o.paths) covered.add(p);
+    }
+    if (covered.size < 0.7 * c.moved) kept.push(c);
+  }
+
+  return kept
+    .map(({ paths, ...c }) => c)
+    .sort((a, b) => b.moved - a.moved || Math.abs(b.deltaPass) - Math.abs(a.deltaPass));
 }
 
 /** Top-level WPT directory, used to aggregate per-feature-area. */
@@ -504,6 +699,7 @@ async function main() {
           Math.abs(y.deltaPass) - Math.abs(x.deltaPass) ||
           y.statusFixed + y.statusBroken - (x.statusFixed + x.statusBroken),
       ),
+    clusters: findClusters(rows, opts.clusterMin, opts.clusterRatio),
     tests: rows.sort((x, y) => Math.abs(y.deltaPass) - Math.abs(x.deltaPass) || x.test.localeCompare(y.test)),
   };
 
@@ -604,6 +800,25 @@ async function main() {
       L(`  ${a.area.padEnd(34)} ${flips.join(', ')}`);
     }
     if (reftestOnly.length > 30) L(`  ... and ${reftestOnly.length - 30} more`);
+    L('');
+  }
+
+  if (report.clusters.length) {
+    L('## Directory clusters (many files in one directory moved the same way)');
+    L(`# Ranked by moved-file count, not subtest delta, so a feature that landed as`);
+    L(`# many tiny gains still shows up. Only a lead, not coverage: a feature that`);
+    L(`# moved one file, or moved files both ways, is absent. Filters applied:`);
+    L(`# >=${opts.clusterMin} moved files, >=${Math.round(opts.clusterRatio * 100)}% one direction, added/removed tests not counted.`);
+    L('# For coverage, read `node scripts/wpt-inventory.js <diff.json>` in full.');
+    // Printed in full, deliberately not sliced to --top: the filters above
+    // already cut 121k tests to a few dozen rows, and truncating by rank would
+    // reintroduce the failure this section exists to prevent — the cluster that
+    // got missed sat one row past a top-20 cut.
+    for (const c of report.clusters) {
+      const dir = c.improved >= c.regressed ? `${c.improved} improved` : `${c.regressed} regressed`;
+      const churn = c.churn ? `  (+${c.churn} new/gone)` : '';
+      L(`  ${String(c.moved).padStart(4)} files  ${signed(c.deltaPass).padStart(7)} subtests  ${dir.padEnd(14)} /${c.dir}${churn}`);
+    }
     L('');
   }
 

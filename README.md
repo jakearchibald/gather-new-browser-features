@@ -15,20 +15,33 @@ mkdir -p tmp
 node scripts/wpt-diff.js --from firefox@beta --to firefox@nightly --json --top 25 > tmp/diff.txt
 ```
 
-Then drill into whatever moved, and read the tests before writing about them:
+Then read the full inventory, drill into whatever moved, and read the tests before writing
+about them:
 
 ```bash
 D=tmp/firefox-beta-vs-firefox-experimental.diff.json   # --json prints the path it chose
+node scripts/wpt-inventory.js "$D" --checklist          # coverage worksheet — start here
+node scripts/wpt-inventory.js "$D" --dirs               # every directory that moved
+node scripts/wpt-inventory.js "$D"                      # every changed file, grouped
 node scripts/wpt-area.js "$D" /fetch                    # what changed in an area
 node scripts/wpt-subtests.js "$D" /fetch/http-cache/no-vary-search.tentative.any.html
 node scripts/wpt-fetch-tests.js --from-diff "$D" --area /fetch --top 3
 ```
+
+Read the inventory in full rather than skimming the biggest numbers. **Subtest count is not
+a measure of importance** — a one-file `+1` was a shipped feature (`-webkit-` pseudo-elements
+now parse) that got missed twice by ranked views, and a `+400` can be one missing property
+fixed. The inventory selects nothing and sorts alphabetically for exactly this reason, and
+it takes no `--exclude` unless you ask: an earlier default of `/third_party` hid the whole
+`Intl.Locale` info proposal. JavaScript and `Intl` features live in `third_party/test262`,
+never under a web-platform directory.
 
 ## Scripts
 
 | Script | Purpose |
 | --- | --- |
 | [wpt-diff.js](scripts/wpt-diff.js) | Diff two runs. Prints a report; `--json` writes structured data for the other scripts. |
+| [wpt-inventory.js](scripts/wpt-inventory.js) | Every changed file, grouped by directory, ranked by nothing. `--checklist` turns it into a coverage worksheet with a per-directory verdict. |
 | [wpt-area.js](scripts/wpt-area.js) | Drill into one path prefix of a diff, or list all regressions/improvements. |
 | [wpt-subtests.js](scripts/wpt-subtests.js) | Diff the individual subtests of one test file, with the assertion message for each failure. Finds the *cause*, not just the count. |
 | [wpt-fetch-tests.js](scripts/wpt-fetch-tests.js) | Fetch WPT test sources so code examples are accurate rather than guessed. |
@@ -47,10 +60,29 @@ node scripts/wpt-diff.js --from firefox@beta --to firefox@nightly --aligned
 diff. Release channels are often tested at different revisions, so it can fail to find a
 match — it says so rather than guessing.
 
+Also supported: a version pin, for release notes between two shipped versions. Once 153 is
+stable, `firefox@stable` no longer resolves to 152, so the baseline has to be named.
+
+```bash
+node scripts/wpt-diff.js --from firefox@stable@152 --to firefox@stable@153 --json
+```
+
+Keep the channel alongside the version — nightly runs outnumber stable ones by ~50:1, so an
+unlabelled version search never reaches back far enough. Version pins can't be combined
+with `--aligned`: two shipped versions are never tested at the same WPT revision.
+
 Test files are classified, which is what makes the analysis possible. The most useful
 category is `newly-running`: a test that previously errored or crashed and now executes,
 which usually means an API went from absent to present. Reference tests get their own
 sections, because they carry no subtests and so are invisible to a subtest delta.
+
+The report ends with a **Directory clusters** section, which ranks directories by how many
+files moved and how one-sided the movement was, rather than by subtest delta. Every other
+section ranks by magnitude, so a feature that lands as many tiny per-file gains is invisible
+in all of them — this section is the one that catches it, and it prints in full rather than
+obeying `--top`. Added and removed tests don't count as movement (that's test-suite churn,
+not the browser), and nothing is excluded by path — `third_party/test262` clusters are where
+JavaScript and `Intl` features show up. Loosen it with `--cluster-min` and `--cluster-ratio`.
 
 ## Interpreting the output
 
@@ -73,6 +105,7 @@ that report no subtests, and partial runs published to wpt.fyi.
 ```text
 scripts/               the tools
 tmp/                   generated diffs (gitignored — a diff.json is ~600KB and changes daily)
+release-notes/         finished notes (gitignored — regenerable, and stale as new runs land)
 .claude/skills/        the repeatable workflow
 ```
 

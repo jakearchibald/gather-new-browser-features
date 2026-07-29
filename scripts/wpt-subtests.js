@@ -263,13 +263,26 @@ function truncate(s, n) {
   return flat.length > n ? flat.slice(0, n - 1) + '…' : flat;
 }
 
-function section(title, rows, limit) {
+/**
+ * `loud` marks the sections a feature description is actually built from. A
+ * partial read of the RIGHT file is harder to notice than not reading it at all:
+ * one pass characterised webrtc-stats/supported-stats.https.html from the tail of
+ * its 24 newly-passing subtests and missed the 12 RTCTransportStats properties in
+ * the middle. Sections that are capped by design (still-failing, passing-in-both)
+ * get the quiet note — shouting on all seven only dilutes it.
+ */
+function section(title, rows, limit, loud = false) {
   if (!rows.length) return;
   console.log(`\n## ${title} (${rows.length})`);
   const shown = limit > 0 ? rows.slice(0, limit) : rows;
   for (const r of shown) console.log(r);
-  if (shown.length < rows.length) {
-    console.log(`  ... and ${rows.length - shown.length} more (--limit 0 for all)`);
+  const hidden = rows.length - shown.length;
+  if (!hidden) return;
+  if (loud) {
+    console.log(`  !! ${hidden} MORE NOT SHOWN — re-run with --limit 0 before describing`);
+    console.log(`  !! this file; the hidden ones may change the story.`);
+  } else {
+    console.log(`  ... and ${hidden} more (--limit 0 for all)`);
   }
 }
 
@@ -347,10 +360,12 @@ function section(title, rows, limit) {
     }
   }
 
-  section('Newly passing', fixed, opts.limit);
-  section('Newly failing', broken, opts.limit);
-  section('Failure changed (still failing)', changed, opts.limit);
-  section('Subtests only in compare (added)', added, opts.limit);
+  // The first four are what a feature description gets built from, so a silent
+  // truncation there becomes a confidently incomplete finding.
+  section('Newly passing', fixed, opts.limit, true);
+  section('Newly failing', broken, opts.limit, true);
+  section('Failure changed (still failing)', changed, opts.limit, true);
+  section('Subtests only in compare (added)', added, opts.limit, true);
   section('Subtests only in baseline (removed)', removed, opts.limit);
   section('Still failing (unchanged)', stillFailing, opts.messages ? opts.limit : Math.min(opts.limit, 10));
   if (opts.all) section('Passing in both', unchanged, opts.limit);
