@@ -40,13 +40,20 @@ if (!argv.length || argv.includes('-h') || argv.includes('--help')) usage();
 
 const opts = { fromDiff: null, area: null, top: 5, head: 60, revision: 'master' };
 const paths = [];
+// Unvalidated Number() would turn a typo into a silently empty listing.
+const num = (flag, raw) => {
+  const n = Number(raw);
+  if (raw === undefined) usage(`missing value for ${flag}`);
+  if (!Number.isFinite(n)) usage(`${flag} needs a number, got "${raw}"`);
+  return n;
+};
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   switch (a) {
     case '--from-diff': opts.fromDiff = argv[++i]; break;
     case '--area': opts.area = argv[++i]; break;
-    case '--top': opts.top = Number(argv[++i]); break;
-    case '--head': opts.head = Number(argv[++i]); break;
+    case '--top': opts.top = num(a, argv[++i]); break;
+    case '--head': opts.head = num(a, argv[++i]); break;
     case '--revision': opts.revision = argv[++i]; break;
     default:
       if (a.startsWith('--')) usage(`unknown option ${a}`);
@@ -60,10 +67,18 @@ for (let i = 0; i < argv.length; i++) {
  *   /foo.any.worker.html?vp9  ->  /foo.any.js
  *   /bar.https.any.html       ->  /bar.https.any.js
  *   /baz.window.html          ->  /baz.window.js
+ *
+ * A `.any.js` test generates one .html per global in its `// META: global=` line,
+ * and tools/manifest/sourcefile.py keeps adding globals — worker-module,
+ * sharedworker-module, serviceworker-module, window-module and six
+ * shadowrealm-in-* variants all exist. Matching any single segment rather than a
+ * fixed list stops each new global from silently 404ing. fetchSource() still
+ * falls back to the literal path, so a real file that happens to look like a
+ * variant is not lost.
  */
 function toSourcePath(testPath) {
   let p = testPath.split('?')[0];
-  p = p.replace(/\.any\.(worker|sharedworker|serviceworker|window|shadowrealm)\.html$/, '.any.js');
+  p = p.replace(/\.any\.[^./]+\.html$/, '.any.js');
   p = p.replace(/\.any\.html$/, '.any.js');
   p = p.replace(/\.window\.html$/, '.window.js');
   p = p.replace(/\.worker\.html$/, '.worker.js');

@@ -19,7 +19,8 @@
  * Options:
  *   --json [file]   also write the full structured diff as JSON. With no value,
  *                   defaults to tmp/<from>-vs-<to>.diff.json (tmp/ is gitignored).
- *   --min-delta <n> ignore subtest deltas smaller than n subtests (default 1)
+ *   --min-delta <n> hide printed regression/improvement rows below n subtests
+ *                   (default 1). Affects the printed report only; --json is complete.
  *   --top <n>       how many rows to print per section (default 40)
  *   --aligned       require both runs to be on the same WPT revision, removing
  *                   test-suite churn from the diff (may select older runs)
@@ -58,19 +59,32 @@ const STATUS_NAMES = {
 // Statuses that mean "the test file itself did not run cleanly".
 const HARNESS_ERROR = new Set(['E', 'C', 'T', 'N', 'PF']);
 
+const CHANNELS = new Set(['stable', 'beta', 'experimental']);
+
+// A reftest reports its entire result as the harness status (PASS/FAIL) and
+// contributes no subtests, so a status flip at 0/0 subtests is a real rendering
+// fix or regression. These sets give such a flip a direction.
+const PASS_LIKE = new Set(['P', 'O']);
+const FAIL_LIKE = new Set(['F']);
+
 /**
  * Parse "product[@channel]" into {product, channel, label}.
- * Bare channel names are accepted for backwards compatibility and assume firefox.
+ * Bare channel names are accepted for convenience and assume firefox.
  */
 function parseSpec(spec) {
-  if (!spec.includes('@') && CHANNEL_ALIASES[spec.toLowerCase()] !== undefined) {
+  const lower = spec.toLowerCase();
+  if (!lower.includes('@') && (CHANNEL_ALIASES[lower] || CHANNELS.has(lower))) {
     // Bare "nightly"/"beta"/"stable" — assume firefox.
-    spec = `firefox@${spec}`;
-  } else if (!spec.includes('@') && ['stable', 'beta', 'experimental'].includes(spec)) {
-    spec = `firefox@${spec}`;
+    spec = `firefox@${lower}`;
   }
   const [product, rawChannel] = spec.split('@');
-  if (!product) throw new Error(`Invalid spec: "${spec}"`);
+  if (!product) throw new Error(`Invalid spec: "${spec}" (expected "product[@channel]")`);
+  if (rawChannel !== undefined && !rawChannel) {
+    throw new Error(
+      `Invalid spec: "${spec}" — trailing "@" with no channel. ` +
+        `Drop the "@" to accept any channel.`,
+    );
+  }
   const channel = rawChannel
     ? CHANNEL_ALIASES[rawChannel.toLowerCase()] || rawChannel.toLowerCase()
     : null;
@@ -97,6 +111,15 @@ function parseArgs(argv) {
       if (v === undefined) throw new Error(`Missing value for ${arg}`);
       return v;
     };
+    // Unvalidated Number() turns a typo into an empty report rather than an
+    // error: slice(0, NaN) is [] and `length > NaN` is false, so every row and
+    // even the "... and N more" line silently disappears.
+    const num = () => {
+      const raw = next();
+      const n = Number(raw);
+      if (!Number.isFinite(n)) throw new Error(`${arg} needs a number, got "${raw}"`);
+      return n;
+    };
     switch (arg) {
       case '--from': opts.from = next(); break;
       case '--to': opts.to = next(); break;
@@ -105,12 +128,14 @@ function parseArgs(argv) {
         if (argv[i + 1] && !argv[i + 1].startsWith('--')) opts.json = argv[++i];
         else opts.json = true;
         break;
-      case '--min-delta': opts.minDelta = Number(next()); break;
-      case '--top': opts.top = Number(next()); break;
+      case '--min-delta': opts.minDelta = num(); break;
+      case '--top': opts.top = num(); break;
       case '--aligned': opts.aligned = true; break;
       case '-h':
       case '--help':
-        console.log(require('fs').readFileSync(__filename, 'utf8').split('*/')[0]);
+        console.log(
+          require('fs').readFileSync(__filename, 'utf8').split('*/')[0].replace(/^#!.*\n/, ''),
+        );
         process.exit(0);
         break;
       default:
@@ -139,8 +164,8 @@ async function getJSON(url) {
 }
 
 /**
- * /api/runs?product=<product>&label=<channel>&max-count=1
- * Returns the most recent TestRun for that product/channel.
+ * /api/runs?product=<product>&label=<channel>&max-count=RUN_CANDIDATES
+ * Returns the most recent TestRuns for that product/channel, newest first.
  */
 async function latestRun(spec) {
   // Fetch several candidates, not just one: partial/aborted runs do land on
@@ -155,11 +180,9 @@ async function latestRun(spec) {
 }
 
 /**
- * Take the most recent run whose summary looks complete.
- *
- * "Complete" is relative: WPT has ~120k test files, but rather than hardcode a
- * threshold we reject runs that are a tiny fraction of the most complete
- * candidate, which tolerates suite growth and per-product differences.
+ * Take the most recent run whose summary looks complete, i.e. has at least
+ * MIN_TESTS test files. Candidates are tried newest-first and the summary is
+ * downloaded lazily, so a complete latest run costs one fetch.
  */
 async function firstUsableRun(spec, runs) {
   const errors = [];
@@ -293,6 +316,22 @@ function classify(before, after) {
   return 'unchanged';
 }
 
+/**
+ * Which way a bare status flip went: 'fixed', 'broken', or 'other'.
+ *
+ * This is what makes reftest results visible. A reference test contributes no
+ * subtests, so a rendering fix is FAIL 0/0 -> PASS 0/0 with deltaPass === 0 —
+ * invisible to anything that ranks by subtest delta, which is most of a WPT
+ * diff. In a typical Firefox stable->beta diff these are ~150 files and much of
+ * the release's CSS work.
+ */
+function statusDirection(before, after) {
+  if (!before || !after || before.status === after.status) return null;
+  if (FAIL_LIKE.has(before.status) && PASS_LIKE.has(after.status)) return 'fixed';
+  if (PASS_LIKE.has(before.status) && FAIL_LIKE.has(after.status)) return 'broken';
+  return 'other';
+}
+
 function summarise(summary) {
   let pass = 0;
   let total = 0;
@@ -381,7 +420,10 @@ async function main() {
 
     const area = areaOf(test);
     if (!areas.has(area)) {
-      areas.set(area, { area, beforePass: 0, beforeTotal: 0, afterPass: 0, afterTotal: 0, changed: 0 });
+      areas.set(area, {
+        area, beforePass: 0, beforeTotal: 0, afterPass: 0, afterTotal: 0,
+        changed: 0, statusFixed: 0, statusBroken: 0,
+      });
     }
     const a = areas.get(area);
     a.beforePass += beforePass;
@@ -392,10 +434,17 @@ async function main() {
     if (kind === 'unchanged') continue;
     a.changed++;
 
+    // Only meaningful for a bare status flip; for improved/regressed rows the
+    // subtest delta already carries the direction.
+    const direction = kind === 'status-changed' ? statusDirection(before, after) : null;
+    if (direction === 'fixed') a.statusFixed++;
+    else if (direction === 'broken') a.statusBroken++;
+
     rows.push({
       test,
       area,
       kind,
+      statusDirection: direction,
       before: before && { status: before.status, pass: beforePass, total: beforeTotal },
       after: after && { status: after.status, pass: afterPass, total: afterTotal },
       deltaPass,
@@ -448,7 +497,13 @@ async function main() {
             ? a.afterPass / a.afterTotal - a.beforePass / a.beforeTotal
             : null,
       }))
-      .sort((x, y) => Math.abs(y.deltaPass) - Math.abs(x.deltaPass)),
+      // Status flips are the tiebreak, so a reftest-only area (all deltas 0)
+      // still sorts above areas that genuinely didn't move.
+      .sort(
+        (x, y) =>
+          Math.abs(y.deltaPass) - Math.abs(x.deltaPass) ||
+          y.statusFixed + y.statusBroken - (x.statusFixed + x.statusBroken),
+      ),
     tests: rows.sort((x, y) => Math.abs(y.deltaPass) - Math.abs(x.deltaPass) || x.test.localeCompare(y.test)),
   };
 
@@ -473,9 +528,12 @@ async function main() {
   L(`pass rate  : ${pct(beforeStats.rate)} -> ${pct(afterStats.rate)} (${signed(+( (afterStats.rate - beforeStats.rate) * 100).toFixed(3))} pp)`);
   L('');
   L('## Change breakdown (by test file)');
-  for (const [k, v] of Object.entries(buckets).sort((a, b) => b[1] - a[1])) {
+  for (const [k, v] of Object.entries(buckets)
+    .filter(([k]) => k !== 'unchanged')
+    .sort((a, b) => b[1] - a[1])) {
     L(`${k.padEnd(18)} ${v}`);
   }
+  L(`${'(unchanged)'.padEnd(18)} ${buckets.unchanged || 0}`);
   L('');
 
   const sections = [
@@ -483,6 +541,18 @@ async function main() {
     ['Improvements (more subtests passing)', (r) => r.kind === 'improved' && r.deltaPass >= opts.minDelta, (a, b) => b.deltaPass - a.deltaPass],
     ['Newly broken (harness error/crash/timeout)', (r) => r.kind === 'newly-broken', null],
     ['Newly running (was error/crash/timeout)', (r) => r.kind === 'newly-running', null],
+    // Reftests carry no subtests, so these rows are all deltaPass 0 and would
+    // otherwise never be printed — despite being real rendering fixes.
+    [
+      'Now passing with no subtests (reftests: rendering fixes)',
+      (r) => r.statusDirection === 'fixed',
+      (a, b) => a.test.localeCompare(b.test),
+    ],
+    [
+      'Now failing with no subtests (reftests: rendering regressions)',
+      (r) => r.statusDirection === 'broken',
+      (a, b) => a.test.localeCompare(b.test),
+    ],
     ['Tests only in ' + opts.toSpec.label, (r) => r.kind === 'added', (a, b) => b.after.total - a.after.total],
     ['Tests only in ' + opts.fromSpec.label, (r) => r.kind === 'removed', (a, b) => b.before.total - a.before.total],
   ];
@@ -502,12 +572,40 @@ async function main() {
   }
 
   L('## Biggest movers by area');
-  for (const a of report.areas.filter((x) => x.deltaPass !== 0).slice(0, 30)) {
+  for (const a of report.areas
+    .filter((x) => x.deltaPass !== 0 || x.statusFixed || x.statusBroken)
+    .slice(0, 30)) {
     const rate =
       a.deltaRate === null ? '' : ` (${pct(a.beforeRate)} -> ${pct(a.afterRate)})`;
-    L(`  ${signed(a.deltaPass).padStart(7)} subtests  ${a.area}${rate}`);
+    // An area can be all reftests, where the subtest delta is 0 and the flip
+    // counts are the entire story.
+    const flips = [
+      a.statusFixed ? `${a.statusFixed} now passing` : null,
+      a.statusBroken ? `${a.statusBroken} now failing` : null,
+    ].filter(Boolean);
+    const noSubtests = flips.length ? `  [no subtests: ${flips.join(', ')}]` : '';
+    L(`  ${signed(a.deltaPass).padStart(7)} subtests  ${a.area}${rate}${noSubtests}`);
   }
   L('');
+
+  // An all-reftest area has deltaPass 0 everywhere, so it sorts below every area
+  // that moved a single subtest and never survives the slice above — even when
+  // dozens of rendering tests started passing. List those separately.
+  const reftestOnly = report.areas
+    .filter((a) => a.deltaPass === 0 && (a.statusFixed || a.statusBroken))
+    .sort((x, y) => y.statusFixed + y.statusBroken - (x.statusFixed + x.statusBroken));
+  if (reftestOnly.length) {
+    L('## Areas that moved only in tests with no subtests (reftests)');
+    for (const a of reftestOnly.slice(0, 30)) {
+      const flips = [
+        a.statusFixed ? `${a.statusFixed} now passing` : null,
+        a.statusBroken ? `${a.statusBroken} now failing` : null,
+      ].filter(Boolean);
+      L(`  ${a.area.padEnd(34)} ${flips.join(', ')}`);
+    }
+    if (reftestOnly.length > 30) L(`  ... and ${reftestOnly.length - 30} more`);
+    L('');
+  }
 
   if (opts.json) {
     const fs = require('fs');

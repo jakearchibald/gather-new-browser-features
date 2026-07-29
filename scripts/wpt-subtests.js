@@ -35,6 +35,7 @@
 
 const fs = require('fs');
 const zlib = require('zlib');
+const { StringDecoder } = require('string_decoder');
 
 function usage(msg) {
   if (msg) console.error(`error: ${msg}\n`);
@@ -47,12 +48,19 @@ if (!argv.length || argv.includes('-h') || argv.includes('--help')) usage();
 
 const opts = { before: null, after: null, limit: 25, all: false, messages: false };
 const positional = [];
+// Unvalidated Number() would turn a typo into a silently truncated report.
+const num = (flag, raw) => {
+  const n = Number(raw);
+  if (raw === undefined) usage(`missing value for ${flag}`);
+  if (!Number.isFinite(n)) usage(`${flag} needs a number, got "${raw}"`);
+  return n;
+};
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   switch (a) {
     case '--before': opts.before = argv[++i]; break;
     case '--after': opts.after = argv[++i]; break;
-    case '--limit': opts.limit = Number(argv[++i]); break;
+    case '--limit': opts.limit = num(a, argv[++i]); break;
     case '--all': opts.all = true; break;
     case '--messages': opts.messages = true; break;
     default:
@@ -79,6 +87,14 @@ async function getJSON(url) {
 function resolveRunIds() {
   if (opts.before && opts.after) {
     return { before: opts.before, after: opts.after, label: null };
+  }
+  // Honouring only the pair meant that one of them alone was silently dropped in
+  // favour of the diff.json's run ids, comparing runs the user didn't ask for.
+  if (opts.before || opts.after) {
+    usage(
+      `--before and --after must be given together ` +
+        `(got only ${opts.before ? '--before' : '--after'})`,
+    );
   }
   if (!diffPath) {
     usage('need either a diff.json or both --before and --after run ids');
@@ -130,7 +146,12 @@ async function fetchSubtests(runId, wantPath) {
   let found = null;
   let sniffed = false;
   let gunzip = null;
-  const chunks = [];
+  let stoppedEarly = false;
+  // Chunk boundaries fall mid-character, and assertion messages routinely contain
+  // non-ASCII (…, curly quotes, CSS values). Decoding each chunk independently
+  // would replace a split sequence with U+FFFD — in the exact text this script
+  // exists to quote verbatim.
+  const decoder = new StringDecoder('utf8');
 
   const feed = (text) => {
     if (found) return;
@@ -173,29 +194,52 @@ async function fetchSubtests(runId, wantPath) {
     }
   };
 
+  let inflateError = null;
   for await (const chunk of stream) {
     const buf = Buffer.from(chunk);
     if (!sniffed) {
       sniffed = true;
       if (buf[0] === 0x1f && buf[1] === 0x8b) {
         gunzip = zlib.createGunzip();
-        gunzip.on('data', (d) => feed(d.toString('utf8')));
-        gunzip.on('error', () => {}); // truncated tail once we stop early
+        gunzip.on('data', (d) => feed(decoder.write(d)));
+        // Abandoning the stream mid-inflate is normal once we've found the test,
+        // so those errors are expected. Before that point an error is a genuinely
+        // corrupt or truncated body, and swallowing it made the script report
+        // "test not present" — sending you off to debug the test path instead.
+        gunzip.on('error', (err) => {
+          if (!stoppedEarly) inflateError = err;
+        });
       }
     }
     if (gunzip) {
       // Inflate synchronously so `found` is up to date before the next chunk.
-      await new Promise((resolve) => gunzip.write(buf, resolve));
+      // A failing write may never flush its callback, so race it against 'error'.
+      await new Promise((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          gunzip.removeListener('error', finish);
+          resolve();
+        };
+        gunzip.once('error', finish);
+        gunzip.write(buf, finish);
+      });
     } else {
-      feed(buf.toString('utf8'));
+      feed(decoder.write(buf));
     }
+    if (inflateError) break;
     if (found) break;
   }
+  stoppedEarly = true;
   if (gunzip) {
     gunzip.removeAllListeners('data');
     gunzip.destroy();
   }
   try { stream.destroy?.(); } catch {}
+  if (inflateError) {
+    throw new Error(`could not decompress ${url}: ${inflateError.message}`);
+  }
 
   return {
     run,
@@ -320,8 +364,13 @@ function section(title, rows, limit) {
     }
     const groups = new Map();
     for (const m of msgs) {
-      // Normalise away test-specific values to spot a shared root cause.
-      const key = truncate(m, 60).replace(/"[^"]*"/g, '"…"').replace(/-?\d+(\.\d+)?/g, 'N');
+      // Normalise away test-specific values to spot a shared root cause, then
+      // truncate. Truncating first left a dangling quote that the "…" rule could
+      // not match, so one root cause split into several near-identical groups.
+      const key = truncate(
+        String(m).replace(/"[^"]*"/g, '"…"').replace(/-?\d+(\.\d+)?/g, 'N'),
+        60,
+      );
       groups.set(key, (groups.get(key) || 0) + 1);
     }
     const top = [...groups.entries()].sort((x, y) => y[1] - x[1]);

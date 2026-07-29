@@ -49,7 +49,8 @@ match — it says so rather than guessing.
 
 Test files are classified, which is what makes the analysis possible. The most useful
 category is `newly-running`: a test that previously errored or crashed and now executes,
-which usually means an API went from absent to present.
+which usually means an API went from absent to present. Reference tests get their own
+sections, because they carry no subtests and so are invisible to a subtest delta.
 
 ## Interpreting the output
 

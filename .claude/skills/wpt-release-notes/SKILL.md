@@ -9,32 +9,27 @@ Turn wpt.fyi test results into release notes that tell web developers what they 
 now do. The scripts produce the data; the value you add is naming the *features* and
 writing *accurate* code examples.
 
-## The core principle
-
 **Web developers don't care about pass rates. They care about features and fixed bugs.**
-
 A pass-rate number is a means to find the story, never the story itself. "fetch improved
 0.4%" is useless; "Compression Dictionary Transport now works" is the actual news, and
 it's the same fact. Always push through to the feature name.
 
 ## Step 1: Generate the diff
 
-All generated artifacts go in `tmp/`, which is gitignored — a `diff.json` is ~600KB and
-changes daily as new runs land, so never commit one. Bare `--json` picks a `tmp/` path
-automatically.
-
 ```bash
 mkdir -p tmp
 node scripts/wpt-diff.js --from firefox@beta --to firefox@nightly --json --top 25 > tmp/diff.txt
-# -> writes tmp/firefox-experimental-vs-firefox-beta.diff.json (path is printed)
+# -> writes tmp/firefox-beta-vs-firefox-experimental.diff.json (the path is printed; call it $D)
 ```
+
+All generated artifacts go in `tmp/`, which is gitignored — a `diff.json` is ~600KB and
+changes daily as new runs land, so never commit one. Bare `--json` picks the `tmp/` path.
 
 Specs are `product[@channel]`. Channels: `stable`, `beta`, `experimental` (aliases:
 `nightly`, `release`, `tp`). Any two specs work, including cross-browser:
 
 ```bash
-node scripts/wpt-diff.js --from chrome@stable --to firefox@nightly --json
-node scripts/wpt-diff.js --from safari@stable --to safari@experimental --json tmp/safari.json
+node scripts/wpt-diff.js --from chrome@stable --to firefox@nightly --json tmp/cross.json
 ```
 
 Add `--aligned` to force both runs onto the same WPT revision. Prefer it when you need
@@ -45,16 +40,17 @@ The script classifies each test file, which is what makes the analysis possible:
 
 | Kind | Meaning |
 | --- | --- |
-| `newly-running` | Was `ERROR`/`CRASH`/`TIMEOUT`, now executes. **Strongest signal a feature shipped** — the harness previously aborted because the API was absent. |
+| `newly-running` | Was `ERROR`/`CRASH`/`TIMEOUT`/`NOTRUN`/`PRECONDITION_FAILED`, now executes. **Strongest signal a feature shipped** — the harness previously aborted because the API was absent. |
 | `improved` / `regressed` | More / fewer subtests passing |
 | `newly-broken` | Now errors, crashes or times out |
 | `added` / `removed` | Test exists on only one side |
-| `status-changed` | Harness status changed, subtest counts didn't |
+| `status-changed` | Harness status flipped with no subtest change — mostly reftests, i.e. rendering fixes. `statusDirection` records which way it went |
+| `subtests-changed` | Subtest total changed, pass count didn't |
 
 ## Step 2: Find what actually moved
 
 `tmp/diff.txt` ends with a per-area rollup. For each interesting area, drill in — never
-guess a feature from a directory name (`$D` = the diff.json path printed in step 1):
+guess a feature from a directory name:
 
 ```bash
 node scripts/wpt-area.js $D /fetch --kinds        # summary + rollup
@@ -67,6 +63,15 @@ Areas are usually dominated by one or two test files. Read the filenames: they n
 feature. In one run, the entire `fetch` gain was `compression-dictionary/*`, and the
 entire `webcodecs` gain was `h265`/`hevc` variants — invisible at the area level.
 
+**Don't skip the reftests.** A reference-image test contributes no subtests, so a
+rendering fix reads `FAIL 0/0 -> PASS 0/0` — a `deltaPass` of 0, invisible to anything
+that ranks by subtest delta. `tmp/diff.txt` gives them two sections of their own plus an
+"areas that moved only in reftests" rollup, and `--improvements`/`--regressions` include
+them. There is no assertion message to quote, so group them by directory and say what the
+directory covers. They are not a footnote: one Firefox stable→beta diff had 140 now
+passing and 8 now failing, including a `css/css-transforms` regression cluster that no
+subtest count would have surfaced.
+
 ## Step 3: Find the *cause* — read the subtest messages
 
 **A subtest count names a file, not a cause.** This is the step that most changes what
@@ -76,13 +81,13 @@ For every test file you plan to write about, diff its individual subtests:
 
 ```bash
 node scripts/wpt-subtests.js $D /web-animations/interfaces/AnimationEffect/getComputedTiming.html
-node scripts/wpt-subtests.js $D /css/css-color/parsing/color-valid-color-mix-function.html --limit 40
 node scripts/wpt-subtests.js $D "/webrtc/idlharness.https.window.html?exclude=(RTCError|RTCErrorEvent)"
 ```
 
 It prints newly-passing and newly-failing subtests **with the assertion message from the
 failing side** — the actual expected-vs-got — plus a rollup of how often each message
-recurs. Quote paths exactly, including any `?query` variant.
+recurs. Quote paths exactly, including any `?query` variant. It streams the raw
+`report.json` (100MB+) and filters to the one path, so allow a few seconds per file.
 
 Why this is mandatory: `getComputedTiming() 26/41 → 41/41` reads like fifteen timing
 fixes. The messages showed all fifteen were `startTime expected 0 but got undefined` —
@@ -103,9 +108,6 @@ Apply the same rule to regressions — `cookieStore.set` losing two subtests tur
 be `expected "cookie-value" but got "deleted"`, which is a describable bug rather than a
 number.
 
-The script streams the raw `report.json` (100MB+) and filters to the one path, so it
-takes a couple of seconds per file and handles one file at a time.
-
 ## Step 4: Read the tests before writing examples
 
 **Do not invent API syntax.** Fetch the tests that changed state and copy from them:
@@ -123,12 +125,8 @@ biggest accuracy win: spec-shaped guesses look plausible and are often wrong.
 
 Apply these before writing. Each one produced a wrong conclusion on a first pass:
 
-**N subtests fixed is not N fixes.** Subtests are not independent: many assert a shared
-precondition first, so one missing property fails all of them, and restoring it fixes all
-of them at once. A big count often means one small change with wide reach. `wpt-subtests.js`
-(step 3) settles it — if one assertion message accounts for most of the newly-passing
-subtests, report one fix and name it. Counting tests instead of causes inflates the
-release notes and misleads about how much actually changed.
+**N subtests fixed is not N fixes.** See step 3 — a big count is often one small change
+with wide reach, and counting tests instead of causes inflates the notes.
 
 **A rising denominator can look like a regression.** If a test previously aborted at
 `ERROR 0/0` and now runs 325 subtests with 205 passing, the *area pass rate can fall*
@@ -137,27 +135,25 @@ while support clearly improved. Check absolute `deltaPass`, not just rate.
 **A uniform failure across a whole suite is usually infrastructure.** When all 46
 `encrypted-media/drm-*` tests time out — including ones already failing — that's a
 CDM/codec provisioning failure on the test machine, not 46 code regressions. Signal:
-tests with `deltaPass === 0` flipping to `TIMEOUT`. Say it's suspect; don't report it as
-a regression.
+tests with `deltaPass === 0` flipping to `TIMEOUT`. Say it's suspect.
 
-**Reftests report 0/0.** Suites like `jpegxl` are mostly reference-image tests
-contributing no subtests. A "5.9% → 100%" headline can rest on a handful of scripted
-tests. Check how many files actually moved before writing a dramatic number.
+**A pass rate can be built on a handful of tests.** Suites like `jpegxl` are mostly
+reference-image tests contributing no subtests, so a "5.9% → 100%" headline can rest on a
+few scripted files. Check how many files actually moved before writing a dramatic number.
 
-**Different WPT revisions mean churn.** Without `--aligned`, some diff is new/rewritten
-tests, not browser change. Large consistent moves are real; single-subtest deltas need
-`--aligned` before you trust them.
+**Different WPT revisions mean churn.** Without `--aligned`, some diff is new or
+rewritten tests, not browser change. Large consistent moves are real; single-subtest
+deltas need `--aligned` before you trust them.
 
 **One feature moves several areas.** CSS Typed OM landing also fixed MathML
 `attributeStyleMap` tests and added container-query unit factories. Group by feature, not
 by directory, or you'll report one change three times.
 
 **Partial runs land on wpt.fyi.** A real Firefox nightly once published a summary with
-only 2 test files. Naively taking the latest run yields a diff where all ~120k tests look
-`removed`. `wpt-diff.js` now skips runs with fewer than 10,000 test files and prints a
+only 2 test files; naively taking the latest run yields a diff where all ~120k tests look
+`removed`. `wpt-diff.js` skips runs with fewer than 10,000 test files and prints a
 `note: skipped N incomplete run(s)`. If a diff claims almost everything was removed or
-added, suspect this before believing it — and sanity-check that the overall test count is
-~120k.
+added, suspect this before believing it — and sanity-check that the total is ~120k.
 
 **`tentative` in a path means the spec is unstable.** Flag these as experimental.
 
@@ -184,7 +180,7 @@ Structure by feature, biggest developer impact first:
 
 Mention subtest counts only as supporting evidence for a claim ("70/196 → 195/196"), never
 as the headline — and never as a proxy for how many things were fixed (see step 3). Cite
-`file:line`-style test paths so claims are checkable.
+test paths so claims are checkable.
 
 ## Reference
 
