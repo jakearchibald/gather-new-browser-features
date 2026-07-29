@@ -49,7 +49,7 @@ never under a web-platform directory.
 | [wpt-diff.js](scripts/wpt-diff.js) | Diff two runs. Prints a report; `--json` writes structured data for the other scripts, and `--subtests` adds per-file subtest names. |
 | [wpt-inventory.js](scripts/wpt-inventory.js) | Every changed file with its subtest names, grouped by directory, ranked by nothing. `--checklist` writes a coverage worksheet; `--verify` fails while any box is unticked. |
 | [wpt-area.js](scripts/wpt-area.js) | Drill into one path prefix of a diff, or list all regressions/improvements. |
-| [wpt-subtests.js](scripts/wpt-subtests.js) | Diff the individual subtests of one test file, with the assertion message for each failure. Finds the *cause*, not just the count. |
+| [wpt-subtests.js](scripts/wpt-subtests.js) | Diff the individual subtests of one or more test files, with the assertion message for each failure. Finds the *cause*, not just the count. Pass every path to one invocation — each call streams two ~330MB reports and scans them in a single pass. |
 | [wpt-fetch-tests.js](scripts/wpt-fetch-tests.js) | Fetch WPT test sources so code examples are accurate rather than guessed. |
 | [wpt-state.js](scripts/wpt-state.js) | Absolute pass/fail of a test in both runs, including tests the diff omits. "Not in the diff" never means "not shipped". |
 | [selftest.js](scripts/selftest.js) | Asserts the tooling still surfaces the features it has historically missed. Run it after changing any of the above. |

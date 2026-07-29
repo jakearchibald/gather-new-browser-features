@@ -52,10 +52,10 @@
  * Channel labels understood by wpt.fyi: stable, beta, experimental (== nightly).
  */
 
-const { StringDecoder } = require('string_decoder');
 // Node's built-in fetch ignores HTTP_PROXY/HTTPS_PROXY, so a proxy-only network
 // looks like broken DNS. See scripts/lib/net.js.
 const { netFetch } = require('./lib/net.js');
+const { extractResults } = require('./lib/report.js');
 
 const CHANNEL_ALIASES = {
   nightly: 'experimental',
@@ -381,170 +381,33 @@ async function alignedRuns(fromSpec, toSpec, maxCount = 100) {
 }
 
 /**
- * Stream a raw report.json and collect the subtests of every test in `wanted`.
+ * Subtest maps for every test in `wanted`, from one run's raw report.
  *
- * Why this exists: a test path often cannot name the feature that shipped.
- * `SVGAnimatedEnumeration-SVGTextPathElement.html` going 2/3 -> 3/3 was the
- * `side` property landing, and nothing in the path says so; `getAnimations.html`
- * going 29/34 -> 33/34 was `{ pseudoElement }`, and the subtest is literally
- * named "Returns animations on pseudo-element when it is specified". Both were
- * missed. Subtest names are the feature vocabulary, and reading them one file at
- * a time — after already deciding a file looks interesting — means the decision
- * that loses features is made with the least information available. So load them
- * for every changed file, up front.
- *
- * The reports are ~330MB, so this streams and keeps only `wanted`. It is a
- * string-aware brace matcher rather than a split on the `{"test":` needle:
- * splitting is much faster but a needle occurring inside an assertion message
- * would silently drop a result, and a silent drop is the failure mode this whole
- * function exists to remove.
+ * A test path frequently cannot name the feature that shipped:
+ * `SVGAnimatedEnumeration-SVGTextPathElement.html` going 2/3 -> 3/3 was the `side`
+ * property landing, and `getAnimations.html` going 29/34 -> 33/34 was
+ * `{ pseudoElement }` — whose subtest is literally named "Returns animations on
+ * pseudo-element when it is specified". Both were missed. Subtest names are the
+ * feature vocabulary, and reading them one file at a time, after already deciding
+ * a file looks interesting, means the decision that loses features is made with
+ * the least information available. So load them for every changed file, up front.
  */
 async function fetchSubtestMaps(run, wanted) {
   const url = run.raw_results_url;
   if (!url) throw new Error(`run ${run.id} has no raw_results_url`);
-  const res = await netFetch(url);
-  if (!res.ok) throw new Error(`GET ${url} -> ${res.status} ${res.statusText}`);
-
+  const { results, malformed } = await extractResults(url, wanted, { label: `run ${run.id}` });
+  if (malformed) {
+    process.stderr.write(`note: ${malformed} unparseable result object(s) in ${run.id}\n`);
+  }
   const out = new Map();
-  // Both spacings occur: some reports are pretty-printed, some are not.
-  const NEEDLES = ['{"test": ', '{"test":'];
-  const KEEP_TAIL = Math.max(...NEEDLES.map((n) => n.length));
-
-  let pending = '';
-  let capturing = null; // { buf, depth, inStr, esc }
-  let malformed = 0;
-
-  const handle = (obj) => {
-    if (!obj || typeof obj.test !== 'string' || !wanted.has(obj.test)) return;
+  for (const [test, obj] of results) {
     const map = new Map();
     for (const s of obj.subtests || []) {
       map.set(s.name, { status: s.status, message: s.message || null });
     }
-    out.set(obj.test, { status: obj.status, subtests: map });
-  };
-
-  // `pending` only ever holds an unconsumed seek tail, and is drained here. It
-  // must not be prepended while mid-capture: doing so spliced a stale tail into
-  // the captured object and desynced the scanner, which found 19 of 2587 files
-  // and reported the other 2568 as "legitimately has no raw result".
-  const feed = (text) => {
-    let rest = pending + text;
-    pending = '';
-    while (rest) {
-      if (capturing) {
-        let end = -1;
-        for (let i = 0; i < rest.length; i++) {
-          const ch = rest[i];
-          if (capturing.esc) { capturing.esc = false; continue; }
-          if (ch === '\\' && capturing.inStr) { capturing.esc = true; continue; }
-          if (ch === '"') { capturing.inStr = !capturing.inStr; continue; }
-          if (capturing.inStr) continue;
-          if (ch === '{') capturing.depth++;
-          else if (ch === '}' && --capturing.depth === 0) { end = i; break; }
-        }
-        if (end === -1) {
-          capturing.buf += rest;
-          return;
-        }
-        capturing.buf += rest.slice(0, end + 1);
-        try {
-          handle(JSON.parse(capturing.buf));
-        } catch {
-          malformed++;
-        }
-        capturing = null;
-        rest = rest.slice(end + 1);
-        continue;
-      }
-      let at = -1;
-      for (const n of NEEDLES) {
-        const i = rest.indexOf(n);
-        if (i !== -1 && (at === -1 || i < at)) at = i;
-      }
-      if (at === -1) {
-        // Keep a tail in case a needle straddles the chunk boundary.
-        pending = rest.length > KEEP_TAIL ? rest.slice(-KEEP_TAIL) : rest;
-        return;
-      }
-      capturing = { buf: '', depth: 0, inStr: false, esc: false };
-      rest = rest.slice(at);
-    }
-  };
-
-  const decoder = new StringDecoder('utf8');
-  let gunzip = null;
-  let sniffed = false;
-  let inflateError = null;
-
-  for await (const chunk of res.body) {
-    const buf = Buffer.from(chunk);
-    if (!sniffed) {
-      sniffed = true;
-      // Served with Content-Encoding: gzip *and* stored gzipped, so there is
-      // often still a gzip stream after fetch() strips one layer.
-      if (buf[0] === 0x1f && buf[1] === 0x8b) {
-        gunzip = require('zlib').createGunzip();
-        gunzip.on('data', (d) => feed(decoder.write(d)));
-        gunzip.on('error', (err) => { inflateError = inflateError || err; });
-      }
-    }
-    if (gunzip) {
-      await new Promise((resolve) => {
-        let done = false;
-        const finish = () => {
-          if (done) return;
-          done = true;
-          gunzip.removeListener('error', finish);
-          resolve();
-        };
-        gunzip.once('error', finish);
-        gunzip.write(buf, finish);
-      });
-    } else {
-      feed(decoder.write(buf));
-    }
-    if (inflateError) break;
-  }
-  if (gunzip) {
-    await new Promise((resolve) => gunzip.end(resolve));
-    gunzip.destroy();
-  }
-  if (inflateError) throw new Error(`could not decompress ${url}: ${inflateError.message}`);
-  if (malformed) {
-    process.stderr.write(`note: ${malformed} unparseable result object(s) in ${run.id}\n`);
+    out.set(test, { status: obj.status, subtests: map });
   }
   return out;
-}
-
-/**
- * fetchSubtestMaps, retried.
- *
- * A ~330MB transfer gets dropped mid-stream often enough to matter — reliably so
- * behind a proxy, which reports it as `aborted`. The scan is stateful, so a retry
- * restarts the stream from the beginning; that costs a few seconds and is far
- * better than losing the run. Failures are announced rather than swallowed: a
- * quietly incomplete subtest map would mean features silently missing from the
- * notes, which is the one outcome this whole file exists to prevent.
- */
-async function fetchSubtestMapsRetrying(run, wanted, attempts = 3) {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await fetchSubtestMaps(run, wanted);
-    } catch (err) {
-      if (attempt >= attempts) {
-        throw new Error(
-          `subtest stream for run ${run.id} failed ${attempts}x (last: ${err.message}).\n` +
-            `Re-run, or drop --subtests to get a diff without subtest names — the ` +
-            `inventory will then say loudly that it has none.`,
-        );
-      }
-      process.stderr.write(
-        `note: subtest stream for run ${run.id} failed (${err.message}); ` +
-          `retrying ${attempt + 1}/${attempts}\n`,
-      );
-      await new Promise((r) => setTimeout(r, 1000 * attempt));
-    }
-  }
 }
 
 /**
@@ -967,8 +830,8 @@ async function main() {
     // proxy that shows up as a mid-transfer "aborted". Sequential also halves peak
     // memory, since only one report's subtest map is being built at a time. The
     // cost is a few seconds of wall clock on a step that runs once per release.
-    const beforeSubtests = await fetchSubtestMapsRetrying(beforeRun, wanted);
-    const afterSubtests = await fetchSubtestMapsRetrying(afterRun, wanted);
+    const beforeSubtests = await fetchSubtestMaps(beforeRun, wanted);
+    const afterSubtests = await fetchSubtestMaps(afterRun, wanted);
     let withNames = 0;
     for (const r of rows) {
       const b = beforeSubtests.get(r.test) || null;
@@ -1181,8 +1044,38 @@ async function main() {
 
   if (opts.json) {
     const fs = require('fs');
-    fs.mkdirSync(require('path').dirname(opts.json), { recursive: true });
-    fs.writeFileSync(opts.json, JSON.stringify(report, null, 2));
+    const path = require('path');
+    fs.mkdirSync(path.dirname(opts.json), { recursive: true });
+
+    // Say so when replacing something, with its age. The default --json path is
+    // derived from the two specs, so two sessions diffing the same pair land on the
+    // same file; a silent overwrite is how one of them loses an artifact it is
+    // still reading. Not a refusal — regenerating a diff is the normal daily
+    // action — just a visible one.
+    let previous = null;
+    try {
+      previous = fs.statSync(opts.json);
+    } catch { /* new file */ }
+    if (previous) {
+      const mins = Math.round((Date.now() - previous.mtimeMs) / 60000);
+      process.stderr.write(
+        `note: replacing existing ${opts.json} (written ${mins} min ago, ` +
+          `${(previous.size / 1e6).toFixed(1)}MB)\n`,
+      );
+    }
+
+    // Write-then-rename, so a reader never sees a half-written artifact. These are
+    // multi-megabyte files and the other scripts JSON.parse them whole, so a torn
+    // read is a hard parse error at best and a truncated diff at worst. rename() is
+    // atomic within a directory, hence the temp file living beside the target.
+    const staging = `${opts.json}.partial-${process.pid}`;
+    try {
+      fs.writeFileSync(staging, JSON.stringify(report, null, 2));
+      fs.renameSync(staging, opts.json);
+    } catch (err) {
+      try { fs.unlinkSync(staging); } catch { /* nothing to clean up */ }
+      throw err;
+    }
     process.stderr.write(`Wrote ${opts.json}\n`);
   }
 }

@@ -11,12 +11,18 @@
  * regression is an exit code.
  *
  * Cases run against real diff artifacts, since the whole point is end-to-end
- * behaviour. Artifacts live in tmp/ and are gitignored, so generate them first:
+ * behaviour. They live in tmp/selftest/ — a subdirectory of its own, because tmp/
+ * is shared scratch space and an actual release-notes run keeps its working files
+ * there. Generate them first:
  *
+ *   mkdir -p tmp/selftest
  *   node scripts/wpt-diff.js --from firefox@stable@151 --to firefox@stable@152 \
- *        --subtests --json tmp/151-152.json > tmp/151-152.txt
+ *        --subtests --json tmp/selftest/151-152.json > tmp/selftest/151-152.txt
  *   node scripts/wpt-diff.js --from firefox@stable@152 --to firefox@stable@153 \
- *        --subtests --json tmp/152-153.json > tmp/152-153.txt
+ *        --subtests --json tmp/selftest/152-153.json > tmp/selftest/152-153.txt
+ *
+ * Or point it at diffs you already have, which costs no downloads:
+ *   node selftest.js --a tmp/151-152.json --b tmp/152-153.json
  *
  * Usage:
  *   node selftest.js [--a <151-152.json>] [--b <152-153.json>]
@@ -32,7 +38,14 @@ const { execFileSync } = require('child_process');
 const SCRIPTS = __dirname;
 const TMP = path.join(__dirname, '..', 'tmp');
 
-const opts = { a: path.join(TMP, '151-152.json'), b: path.join(TMP, '152-153.json') };
+// Own subdirectory, not tmp/ directly. tmp/ is shared scratch space and a
+// release-notes run in another session keeps its working artifacts there; a fixed
+// name like tmp/151-152.json collides with whatever that run happens to be doing,
+// and "cleaning up" one has already cost another session a ~4GB re-download.
+const opts = {
+  a: path.join(TMP, 'selftest', '151-152.json'),
+  b: path.join(TMP, 'selftest', '152-153.json'),
+};
 for (let i = 2; i < process.argv.length; i++) {
   if (process.argv[i] === '--a') opts.a = process.argv[++i];
   else if (process.argv[i] === '--b') opts.b = process.argv[++i];
@@ -138,6 +151,22 @@ cases.push({
     check('151-152: that evidence appears in the inventory listing', () => {
       const out = run('wpt-inventory.js', [file, '--include', '/web-animations/interfaces/Animatable']);
       return /pseudo-element/i.test(out) ? null : 'inventory output does not show the subtest name';
+    });
+
+    // The shape that invites itself is a shell loop calling wpt-subtests.js once
+    // per path, each call streaming two ~330MB reports. Several paths must resolve
+    // in a single invocation or that cost comes straight back.
+    check('151-152: wpt-subtests.js resolves several paths in one invocation', () => {
+      const out = run('wpt-subtests.js', [
+        file,
+        SVG,
+        ANIM,
+        '--limit', '1',
+      ]);
+      const headers = (out.match(/^# \/.+$/gm) || []).length;
+      if (headers !== 2) return `expected 2 per-path sections, got ${headers}`;
+      if (/matched NOTHING/.test(out)) return 'one of the paths resolved to nothing';
+      return null;
     });
 
     // A feature can ship across several directories; the vocabulary section is

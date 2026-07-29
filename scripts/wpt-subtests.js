@@ -14,12 +14,24 @@
  * names, method names, the actual expected-vs-got values.
  *
  * Usage:
- *   node wpt-subtests.js <diff.json> <test-path>
- *   node wpt-subtests.js --before <run_id> --after <run_id> <test-path>
+ *   node wpt-subtests.js <diff.json> <test-path> [<test-path> ...]
+ *   node wpt-subtests.js --before <run_id> --after <run_id> <test-path> ...
  *
  *   node wpt-subtests.js diff.json /web-animations/interfaces/AnimationEffect/getComputedTiming.html
  *   node wpt-subtests.js diff.json /css/css-color/parsing/color-valid-color-mix-function.html --limit 40
  *   node wpt-subtests.js diff.json /fetch/http-cache/no-vary-search.tentative.any.html --all
+ *
+ * PASS SEVERAL PATHS AT ONCE. Each invocation streams two ~330MB reports, and they
+ * are scanned in a single pass, so N paths in one call costs what one path costs.
+ * A shell loop calling this once per path pays that download N times over — three
+ * paths that way is ~4GB, and doubling it again by piping the same call into `head`
+ * and then re-running it for the rollup.
+ *
+ * Often you need neither: if the diff was built with `wpt-diff.js --subtests`, the
+ * newly-passing/failing names and messages are already in it, and
+ * `wpt-inventory.js <diff.json> --include <path>` reads them locally with no
+ * network at all. Reach for this script for the full message rollup, for more than
+ * the 25 names the diff stores per file, or for unchanged-failure context.
  *
  * Options:
  *   --before <id>  run id for the baseline (default: from diff.json)
@@ -34,9 +46,8 @@
  */
 
 const fs = require('fs');
-const zlib = require('zlib');
-const { StringDecoder } = require('string_decoder');
 const { netFetch } = require('./lib/net.js');
+const { extractResults } = require('./lib/report.js');
 
 function usage(msg) {
   if (msg) console.error(`error: ${msg}\n`);
@@ -71,12 +82,13 @@ for (let i = 0; i < argv.length; i++) {
 }
 
 let diffPath = null;
-let testPath = null;
+// Several test paths are accepted and resolved in ONE pass over each report.
+const testPaths = [];
 for (const p of positional) {
-  if (p.startsWith('/')) testPath = p;
+  if (p.startsWith('/')) testPaths.push(p);
   else diffPath = p;
 }
-if (!testPath) usage('need a test path (starts with "/")');
+if (!testPaths.length) usage('need at least one test path (starts with "/")');
 
 async function getJSON(url) {
   const res = await netFetch(url);
@@ -115,137 +127,20 @@ function resolveRunIds() {
 }
 
 /**
- * Stream a raw report.json and pull out the subtests of exactly one test path.
+ * Subtests for a set of test paths, from one run's raw report — in a single pass.
  *
- * The reports are far too big to JSON.parse whole. Rather than a full streaming
- * parser, exploit the report's shape: results is an array of objects each starting
- * with `{"test":"<path>"`. We buffer only while inside the object we want, tracking
- * brace depth (ignoring braces inside strings) to know where it ends.
+ * Taking several paths at once matters: the shape that invites itself is a shell
+ * loop calling this script once per path, and each call streams two ~330MB
+ * reports. Three paths that way is ~4GB to answer a question about three files.
  */
-async function fetchSubtests(runId, wantPath) {
+async function fetchSubtests(runId, wantPaths) {
   const runs = await getJSON(`https://wpt.fyi/api/runs?run_ids=${runId}`);
   if (!runs.length) throw new Error(`no run found for id ${runId}`);
   const run = runs[0];
   const url = run.raw_results_url;
   if (!url) throw new Error(`run ${runId} has no raw_results_url`);
-
-  const res = await netFetch(url);
-  if (!res.ok) throw new Error(`GET ${url} -> ${res.status} ${res.statusText}`);
-
-  // GCS may or may not pre-decompress; sniff the gzip magic on the first chunk.
-  // (These reports are served with Content-Encoding: gzip *and* stored gzipped, so
-  // after fetch() strips one layer there is often still a gzip stream underneath.)
-  let stream = res.body;
-  // The reports are pretty-printed with a space after the colon. Match both forms.
-  const needles = [
-    `{"test": ${JSON.stringify(wantPath)}`,
-    `{"test":${JSON.stringify(wantPath)}`,
-  ];
-
-  let pending = '';
-  let capturing = null; // {buf, depth, inStr, esc}
-  let found = null;
-  let sniffed = false;
-  let gunzip = null;
-  let stoppedEarly = false;
-  // Chunk boundaries fall mid-character, and assertion messages routinely contain
-  // non-ASCII (…, curly quotes, CSS values). Decoding each chunk independently
-  // would replace a split sequence with U+FFFD — in the exact text this script
-  // exists to quote verbatim.
-  const decoder = new StringDecoder('utf8');
-
-  const feed = (text) => {
-    if (found) return;
-    if (capturing) {
-      // Continue accumulating the object we're inside.
-      for (let i = 0; i < text.length; i++) {
-        const ch = text[i];
-        capturing.buf += ch;
-        if (capturing.esc) { capturing.esc = false; continue; }
-        if (ch === '\\' && capturing.inStr) { capturing.esc = true; continue; }
-        if (ch === '"') { capturing.inStr = !capturing.inStr; continue; }
-        if (capturing.inStr) continue;
-        if (ch === '{') capturing.depth++;
-        else if (ch === '}') {
-          capturing.depth--;
-          if (capturing.depth === 0) {
-            found = JSON.parse(capturing.buf);
-            capturing = null;
-            return;
-          }
-        }
-      }
-      return;
-    }
-    pending += text;
-    let at = -1;
-    for (const n of needles) {
-      const i = pending.indexOf(n);
-      if (i !== -1 && (at === -1 || i < at)) at = i;
-    }
-    if (at !== -1) {
-      capturing = { buf: '', depth: 0, inStr: false, esc: false };
-      const rest = pending.slice(at);
-      pending = '';
-      feed(rest);
-    } else {
-      // Keep only enough tail to catch a needle split across chunk boundaries.
-      const keep = Math.max(...needles.map((n) => n.length)) * 2;
-      if (pending.length > keep) pending = pending.slice(-keep);
-    }
-  };
-
-  let inflateError = null;
-  for await (const chunk of stream) {
-    const buf = Buffer.from(chunk);
-    if (!sniffed) {
-      sniffed = true;
-      if (buf[0] === 0x1f && buf[1] === 0x8b) {
-        gunzip = zlib.createGunzip();
-        gunzip.on('data', (d) => feed(decoder.write(d)));
-        // Abandoning the stream mid-inflate is normal once we've found the test,
-        // so those errors are expected. Before that point an error is a genuinely
-        // corrupt or truncated body, and swallowing it made the script report
-        // "test not present" — sending you off to debug the test path instead.
-        gunzip.on('error', (err) => {
-          if (!stoppedEarly) inflateError = err;
-        });
-      }
-    }
-    if (gunzip) {
-      // Inflate synchronously so `found` is up to date before the next chunk.
-      // A failing write may never flush its callback, so race it against 'error'.
-      await new Promise((resolve) => {
-        let done = false;
-        const finish = () => {
-          if (done) return;
-          done = true;
-          gunzip.removeListener('error', finish);
-          resolve();
-        };
-        gunzip.once('error', finish);
-        gunzip.write(buf, finish);
-      });
-    } else {
-      feed(decoder.write(buf));
-    }
-    if (inflateError) break;
-    if (found) break;
-  }
-  stoppedEarly = true;
-  if (gunzip) {
-    gunzip.removeAllListeners('data');
-    gunzip.destroy();
-  }
-  try { stream.destroy?.(); } catch {}
-  if (inflateError) {
-    throw new Error(`could not decompress ${url}: ${inflateError.message}`);
-  }
-
-  return {
-    run,
-    result: found,
-  };
+  const { results } = await extractResults(url, new Set(wantPaths), { label: `run ${runId}` });
+  return { run, results };
 }
 
 /** Index subtests by name for comparison. */
@@ -287,43 +182,29 @@ function section(title, rows, limit, loud = false) {
   }
 }
 
-(async () => {
-  const ids = resolveRunIds();
-  process.stderr.write(`Fetching raw results for ${testPath}\n`);
-  process.stderr.write(`  (streaming two large reports; this takes a moment)\n`);
+/** Print the full comparison for one test file. */
+function reportOne(testPath, bResult, aResult) {
+  console.log(`\n${'='.repeat(74)}`);
+  console.log(`# ${testPath}`);
+  console.log('='.repeat(74));
 
-  // Sequential, not Promise.all: these usually stop early, but a test near the end
-  // of a report streams the whole ~330MB, and two of those at once starve each
-  // other's socket — behind a proxy that surfaces as a mid-transfer "aborted".
-  const before = await fetchSubtests(ids.before, testPath);
-  const after = await fetchSubtests(ids.after, testPath);
-
-  const bLabel = ids.label?.before
-    || `${before.run.browser_name} ${before.run.browser_version}`;
-  const aLabel = ids.label?.after
-    || `${after.run.browser_name} ${after.run.browser_version}`;
-
-  console.log(`# Subtest diff: ${testPath}`);
-  console.log(`\nbaseline : ${bLabel}, run ${ids.before}`);
-  console.log(`compare  : ${aLabel}, run ${ids.after}`);
-
-  if (!before.result && !after.result) {
-    console.log(`\nTest not present in either report.`);
-    console.log(`Check the path, including any ?query variant.`);
+  if (!bResult && !aResult) {
+    console.log(`\nNot present in either report. Check the path, including any ?query`);
+    console.log(`variant, and that .any.js tests are named e.g. foo.any.worker.html.`);
     return;
   }
 
-  const bStatus = before.result?.status ?? '(absent)';
-  const aStatus = after.result?.status ?? '(absent)';
-  const bMap = indexSubtests(before.result);
-  const aMap = indexSubtests(after.result);
+  const bStatus = bResult?.status ?? '(absent)';
+  const aStatus = aResult?.status ?? '(absent)';
+  const bMap = indexSubtests(bResult);
+  const aMap = indexSubtests(aResult);
   const count = (m) => [...m.values()].filter((v) => v.status === 'PASS').length;
 
   console.log(`\nharness  : ${bStatus} -> ${aStatus}`);
   console.log(`subtests : ${count(bMap)}/${bMap.size} -> ${count(aMap)}/${aMap.size} passing`);
-  if (before.result?.message || after.result?.message) {
-    if (before.result?.message) console.log(`baseline harness message: ${truncate(before.result.message, 200)}`);
-    if (after.result?.message) console.log(`compare harness message : ${truncate(after.result.message, 200)}`);
+  if (bResult?.message || aResult?.message) {
+    if (bResult?.message) console.log(`baseline harness message: ${truncate(bResult.message, 200)}`);
+    if (aResult?.message) console.log(`compare harness message : ${truncate(aResult.message, 200)}`);
   }
 
   const names = new Set([...bMap.keys(), ...aMap.keys()]);
@@ -399,6 +280,40 @@ function section(title, rows, limit, loud = false) {
         console.log(`  ${String(n).padStart(3)}x  ${msg}`);
       }
     }
+  }
+}
+
+(async () => {
+  const ids = resolveRunIds();
+  process.stderr.write(`Fetching raw results for ${testPaths.length} test path(s)\n`);
+  process.stderr.write(`  (one pass over each of two large reports; this takes a moment)\n`);
+
+  // Sequential, not Promise.all: a path near the end of a report streams the whole
+  // ~330MB, and two of those at once starve each other's socket — behind a proxy
+  // that surfaces as a mid-transfer "aborted".
+  const before = await fetchSubtests(ids.before, testPaths);
+  const after = await fetchSubtests(ids.after, testPaths);
+
+  const bLabel = ids.label?.before
+    || `${before.run.browser_name} ${before.run.browser_version}`;
+  const aLabel = ids.label?.after
+    || `${after.run.browser_name} ${after.run.browser_version}`;
+
+  console.log(`# Subtest diff: ${testPaths.length} test file(s)`);
+  console.log(`\nbaseline : ${bLabel}, run ${ids.before}`);
+  console.log(`compare  : ${aLabel}, run ${ids.after}`);
+
+  for (const p of testPaths) {
+    reportOne(p, before.results.get(p) || null, after.results.get(p) || null);
+  }
+
+  // Loud tail: with several paths a single "not present" line scrolls away, and a
+  // path silently yielding nothing is how a mistyped ?query variant becomes
+  // "no change here".
+  const missing = testPaths.filter((p) => !before.results.has(p) && !after.results.has(p));
+  if (missing.length) {
+    console.log(`\n!! ${missing.length} of ${testPaths.length} path(s) matched NOTHING in either report:`);
+    for (const p of missing) console.log(`!!   ${p}`);
   }
 })().catch((err) => {
   console.error(`error: ${err.message}`);

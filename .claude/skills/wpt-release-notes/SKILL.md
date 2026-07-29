@@ -195,8 +195,18 @@ test file you plan to write about, **with `--limit 0`, and read every line**:
 
 ```bash
 node scripts/wpt-subtests.js $D /web-animations/interfaces/AnimationEffect/getComputedTiming.html --limit 0
-node scripts/wpt-subtests.js $D "/webrtc/idlharness.https.window.html?exclude=(RTCError|RTCErrorEvent)" --limit 0
+# several files at once — ONE pass over the reports, not one download each:
+node scripts/wpt-subtests.js $D /path/one.html /path/two.html /path/three.html --limit 0
 ```
+
+**Pass every path you care about to a single invocation.** Each call streams two
+~330MB reports and scans them once, so N paths cost what one costs. A shell loop
+calling this per path pays that download N times — and piping the same call into
+`head` and then re-running it for the rollup doubles it again. Note also that step 2
+already has the names and messages for 800-odd files locally, so
+`wpt-inventory.js $D --include <path>` answers many questions with no network at
+all; come here for the full rollup, for more than the 25 names the diff stores per
+file, or for unchanged-failure context.
 
 **Never pipe this through `head`, `tail`, or a `sed` range when deciding what a file
 means.** It is the one mistake that produces a *confidently wrong* finding rather than a
