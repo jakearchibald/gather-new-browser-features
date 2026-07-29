@@ -1,10 +1,52 @@
 {
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "failIfUnavailable": true,
+    "network": {
+      "allowedDomains": [
+        "wpt.fyi",
+        "storage.googleapis.com",
+        "raw.githubusercontent.com",
+        "registry.npmjs.org"
+      ]
+    },
+    "filesystem": {
+      "allowWrite": ["tmp", "release-notes"]
+    },
+    "credentials": {
+      "files": [
+        { "path": "~/.ssh", "mode": "deny" },
+        { "path": "~/.aws", "mode": "deny" },
+        { "path": "~/.config/gh", "mode": "deny" },
+        { "path": "~/.npmrc", "mode": "deny" },
+        { "path": "~/.netrc", "mode": "deny" }
+      ]
+    }
+  },
   "permissions": {
     "allow": [
-      "Bash(node scripts/*)",
+      "Bash(node scripts/wpt-diff.js *)",
+      "Bash(node scripts/wpt-inventory.js *)",
+      "Bash(node scripts/wpt-area.js *)",
+      "Bash(node scripts/wpt-subtests.js *)",
+      "Bash(node scripts/wpt-fetch-tests.js *)",
+      "Bash(node scripts/wpt-state.js *)",
+      "Bash(node scripts/selftest.js *)",
       "Bash(mkdir -p tmp)",
-      "Edit(/.claude/skills/wpt-release-notes/**)",
-      "Bash(awk '/^## /{if\\(n\\)print \"  \"n\" \"s; s=$0; n=0} {n++} END{print \"  \"n\" \"s}' .claude/skills/wpt-release-notes/SKILL.md)"
+      "Bash(mkdir -p release-notes)",
+      "Edit(tmp/**)",
+      "Write(tmp/**)",
+      "Edit(release-notes/**)",
+      "Write(release-notes/**)",
+      "Edit(/.claude/skills/wpt-release-notes/**)"
+    ],
+    "deny": [
+      "Bash(git push *)",
+      "Bash(gh *)",
+      "Bash(curl *)",
+      "Bash(npm *)",
+      "Bash(npx *)"
     ]
   }
 }

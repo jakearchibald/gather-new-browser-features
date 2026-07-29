@@ -53,13 +53,7 @@ const run = (script, args) =>
 
 let failed = 0;
 let passed = 0;
-const check = (name, fn) => {
-  let problem;
-  try {
-    problem = fn();
-  } catch (err) {
-    problem = `threw: ${err.message}`;
-  }
+const report = (name, problem) => {
   if (problem) {
     failed++;
     console.log(`FAIL  ${name}`);
@@ -68,6 +62,26 @@ const check = (name, fn) => {
     passed++;
     console.log(`ok    ${name}`);
   }
+};
+
+const check = (name, fn) => {
+  let problem;
+  try {
+    problem = fn();
+  } catch (err) {
+    problem = `threw: ${err.message}`;
+  }
+  report(name, problem);
+};
+
+const checkAsync = async (name, fn) => {
+  let problem;
+  try {
+    problem = await fn();
+  } catch (err) {
+    problem = `threw: ${err.message}`;
+  }
+  report(name, problem);
 };
 
 /** The diff row for one test, or a message saying it is missing. */
@@ -186,6 +200,68 @@ cases.push({
 });
 
 // ---------------------------------------------------------------------------
+// Transport (scripts/lib/net.js)
+// ---------------------------------------------------------------------------
+// This layer had no coverage while it was hand-rolled, and two bugs got through
+// in one sitting — both of which failed misleadingly rather than loudly. A
+// truncated or silently-empty transfer poisons every downstream conclusion, so
+// the properties that matter are asserted here: a real streaming body, correct
+// decompression, and that a large transfer arrives COMPLETE.
+async function transportChecks() {
+  const { netFetch } = require(path.join(SCRIPTS, 'lib', 'net.js'));
+
+  let runs = null;
+  await checkAsync('net: JSON over the wire (proxy-aware if one is configured)', async () => {
+    const res = await netFetch('https://wpt.fyi/api/runs?product=firefox&label=stable&max-count=1');
+    if (!res.ok) return `wpt.fyi returned ${res.status}`;
+    runs = await res.json();
+    return Array.isArray(runs) && runs.length ? null : 'no runs in the response';
+  });
+  if (!runs) return;
+
+  await checkAsync('net: body is a streaming ReadableStream, not a buffered string', async () => {
+    const res = await netFetch(`https://wpt.fyi/api/runs?run_ids=${runs[0].id}`);
+    const isStream = res.body && typeof res.body.getReader === 'function';
+    await res.arrayBuffer();
+    return isStream ? null : `res.body is ${res.body && res.body.constructor.name}`;
+  });
+
+  await checkAsync('net: Content-Encoding is undone, exposing the stored gzip layer', async () => {
+    const res = await netFetch(runs[0].results_url);
+    const buf = Buffer.from(await res.arrayBuffer());
+    // The summary blobs are stored gzipped AND served gzipped. After one layer is
+    // undone this must be either plain JSON or a single remaining gzip stream —
+    // never a double-encoded body, which is what a missing decompression looks like.
+    const stillGzip = buf[0] === 0x1f && buf[1] === 0x8b;
+    const text = stillGzip ? require('zlib').gunzipSync(buf).toString('utf8') : buf.toString('utf8');
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (err) {
+      return `summary did not decode to JSON: ${err.message}`;
+    }
+    return Object.keys(parsed).length > 10000 ? null : `only ${Object.keys(parsed).length} tests`;
+  });
+
+  await checkAsync('net: a ~330MB stream arrives complete, not truncated', async () => {
+    const url = runs[0].raw_results_url;
+    if (!url) return 'run has no raw_results_url';
+    const res = await netFetch(url);
+    let bytes = 0;
+    let tail = '';
+    const decoder = new (require('string_decoder').StringDecoder)('utf8');
+    for await (const chunk of res.body) {
+      bytes += chunk.length;
+      // Keep only the end, to prove the transfer reached the end of the document.
+      tail = (tail + decoder.write(Buffer.from(chunk))).slice(-4096);
+    }
+    if (bytes < 50_000_000) return `only ${(bytes / 1e6).toFixed(1)}MB — transfer looks truncated`;
+    // A complete wptreport ends with the closing brace of the top-level object.
+    return tail.trimEnd().endsWith('}') ? null : `stream ended mid-document (${(bytes / 1e6).toFixed(0)}MB)`;
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Artifact-independent
 // ---------------------------------------------------------------------------
 function pathBoundaryChecks(file) {
@@ -199,26 +275,32 @@ function pathBoundaryChecks(file) {
   });
 }
 
-let missing = 0;
-for (const c of cases) {
-  const file = opts[c.artifact];
-  if (!fs.existsSync(file)) {
-    missing++;
-    console.log(`SKIP  ${path.basename(file)} not found — cannot check ${c.artifact === 'a' ? '151->152' : '152->153'}`);
-    continue;
+(async () => {
+  // Transport first: if the network layer is broken, every artifact-based check
+  // below is either stale or about to be regenerated from bad data.
+  await transportChecks();
+
+  let missing = 0;
+  for (const c of cases) {
+    const file = opts[c.artifact];
+    if (!fs.existsSync(file)) {
+      missing++;
+      console.log(`SKIP  ${path.basename(file)} not found — cannot check ${c.artifact === 'a' ? '151->152' : '152->153'}`);
+      continue;
+    }
+    const diff = JSON.parse(fs.readFileSync(file, 'utf8'));
+    c.checks(diff, file);
   }
-  const diff = JSON.parse(fs.readFileSync(file, 'utf8'));
-  c.checks(diff, file);
-}
 
-const anyArtifact = [opts.a, opts.b].find((f) => fs.existsSync(f));
-if (anyArtifact) pathBoundaryChecks(anyArtifact);
+  const anyArtifact = [opts.a, opts.b].find((f) => fs.existsSync(f));
+  if (anyArtifact) pathBoundaryChecks(anyArtifact);
 
-console.log('');
-console.log(`${passed} passed, ${failed} failed${missing ? `, ${missing} artifact(s) missing` : ''}`);
-if (failed) process.exit(1);
-if (missing) {
   console.log('');
-  console.log('Coverage is INCOMPLETE — generate the artifacts and re-run (see --help).');
-  process.exit(2);
-}
+  console.log(`${passed} passed, ${failed} failed${missing ? `, ${missing} artifact(s) missing` : ''}`);
+  if (failed) process.exit(1);
+  if (missing) {
+    console.log('');
+    console.log('Coverage is INCOMPLETE — generate the artifacts and re-run (see --help).');
+    process.exit(2);
+  }
+})();

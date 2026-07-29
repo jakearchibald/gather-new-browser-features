@@ -36,6 +36,7 @@
 const fs = require('fs');
 const zlib = require('zlib');
 const { StringDecoder } = require('string_decoder');
+const { netFetch } = require('./lib/net.js');
 
 function usage(msg) {
   if (msg) console.error(`error: ${msg}\n`);
@@ -78,7 +79,7 @@ for (const p of positional) {
 if (!testPath) usage('need a test path (starts with "/")');
 
 async function getJSON(url) {
-  const res = await fetch(url);
+  const res = await netFetch(url);
   if (!res.ok) throw new Error(`GET ${url} -> ${res.status} ${res.statusText}`);
   return res.json();
 }
@@ -128,7 +129,7 @@ async function fetchSubtests(runId, wantPath) {
   const url = run.raw_results_url;
   if (!url) throw new Error(`run ${runId} has no raw_results_url`);
 
-  const res = await fetch(url);
+  const res = await netFetch(url);
   if (!res.ok) throw new Error(`GET ${url} -> ${res.status} ${res.statusText}`);
 
   // GCS may or may not pre-decompress; sniff the gzip magic on the first chunk.
@@ -291,10 +292,11 @@ function section(title, rows, limit, loud = false) {
   process.stderr.write(`Fetching raw results for ${testPath}\n`);
   process.stderr.write(`  (streaming two large reports; this takes a moment)\n`);
 
-  const [before, after] = await Promise.all([
-    fetchSubtests(ids.before, testPath),
-    fetchSubtests(ids.after, testPath),
-  ]);
+  // Sequential, not Promise.all: these usually stop early, but a test near the end
+  // of a report streams the whole ~330MB, and two of those at once starve each
+  // other's socket — behind a proxy that surfaces as a mid-transfer "aborted".
+  const before = await fetchSubtests(ids.before, testPath);
+  const after = await fetchSubtests(ids.after, testPath);
 
   const bLabel = ids.label?.before
     || `${before.run.browser_name} ${before.run.browser_version}`;

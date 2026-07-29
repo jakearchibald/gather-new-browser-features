@@ -1,0 +1,23 @@
+{
+  "_comment": [
+    "Optional hardening, committed so it travels with the repo.",
+    "",
+    "sandbox.network.strictAllowlist is deliberately ignored when it comes from",
+    "project settings (.claude/settings.json / settings.local.json) — otherwise any",
+    "repo you cloned could silently redefine your egress policy. It IS honored from",
+    "user settings, managed/policy settings, or the --settings flag, so this file is",
+    "the portable way to opt in:",
+    "",
+    "  claude --settings .claude/strict-sandbox.json",
+    "",
+    "WITHOUT this flag file, allowedDomains in .claude/settings.json enforces",
+    "NOTHING — it is inert unless strictAllowlist comes from an honored source.",
+    "Verified: with the committed project config alone, example.com and pypi.org",
+    "are both reachable from a sandboxed command. Filesystem confinement and the",
+    "credential denials in settings.json do apply; egress confinement does not.",
+    "With this file, hosts outside allowedDomains are refused."
+  ],
+  "sandbox": {
+    "network": { "strictAllowlist": true }
+  }
+}

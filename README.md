@@ -6,11 +6,14 @@ developer-facing release notes: what a browser can newly do, and what broke.
 Works for any two builds wpt.fyi knows about — channels of one browser
 (Firefox nightly vs beta) or across browsers (Chrome stable vs Firefox nightly).
 
-Node 18+ required (uses built-in `fetch`). No dependencies.
+Node 18+ required. One dependency: `undici`, for proxy-aware `fetch` — Node's built-in
+`fetch` ignores `HTTP_PROXY`/`HTTPS_PROXY`, which makes these scripts fail with `ENOTFOUND`
+on every host behind a corporate proxy or a sandbox. `pnpm install` before first use.
 
 ## Quick start
 
 ```bash
+pnpm install
 mkdir -p tmp
 node scripts/wpt-diff.js --from firefox@beta --to firefox@nightly --subtests --json --top 25 > tmp/diff.txt
 ```
@@ -115,6 +118,7 @@ that report no subtests, and partial runs published to wpt.fyi.
 
 ```text
 scripts/               the tools
+scripts/lib/net.js     proxy-aware fetch; Node's built-in fetch ignores HTTP_PROXY
 tmp/                   generated diffs (gitignored — ~2.5MB with --subtests, changes daily)
 release-notes/         finished notes (gitignored — regenerable, and stale as new runs land)
 .claude/skills/        the repeatable workflow
@@ -122,6 +126,34 @@ release-notes/         finished notes (gitignored — regenerable, and stale as 
 
 `selftest.js` needs two diff artifacts to run against; see its `--help` for the two commands
 that generate them.
+
+## Running it without permission prompts
+
+`.claude/settings.json` is committed, so a clone is quiet with no per-user setup. It runs
+Bash in Claude Code's sandbox and auto-allows it on that basis, which is why there are
+almost no prompts. What the committed file actually gives you:
+
+- **Writes** confined to `tmp/` and `release-notes/`.
+- **Credentials** (`~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.npmrc`, `~/.netrc`) unreadable
+  from inside the sandbox, so a 330MB stream from the network can't become an exfiltration
+  path.
+- `failIfUnavailable: true` — a machine that can't start the sandbox fails loudly rather
+  than quietly running commands unconfined. On a platform without sandbox support, drop
+  that line knowingly rather than wondering why nothing starts.
+
+**Egress is NOT confined by the committed file.** `allowedDomains` is listed there, but
+`sandbox.network.strictAllowlist` is required to enforce it and is deliberately ignored from
+project settings — otherwise a repo you cloned could rewrite your egress policy. Verified:
+with the committed config alone, `example.com` and `pypi.org` are both reachable. To get
+real confinement to the four hosts this repo uses, pass the committed flag file:
+
+```bash
+claude --settings .claude/strict-sandbox.json
+```
+
+Or put `{"sandbox":{"network":{"strictAllowlist":true}}}` in your own
+`~/.claude/settings.json`, where it applies to every project but only bites where a sandbox
+is actually enabled.
 
 ## Reference
 

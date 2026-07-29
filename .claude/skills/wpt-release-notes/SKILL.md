@@ -17,6 +17,7 @@ it's the same fact. Always push through to the feature name.
 ## Step 1: Generate the diff
 
 ```bash
+pnpm install   # once; undici provides proxy-aware fetch, which Node's lacks
 mkdir -p tmp
 node scripts/wpt-diff.js --from firefox@beta --to firefox@nightly --subtests --json --top 25 > tmp/diff.txt
 # -> writes tmp/firefox-beta-vs-firefox-experimental.diff.json (the path is printed; call it $D)

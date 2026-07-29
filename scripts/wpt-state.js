@@ -37,6 +37,7 @@
 
 const fs = require('fs');
 const zlib = require('zlib');
+const { netFetch } = require('./lib/net.js');
 
 const STATUS_NAMES = {
   O: 'OK', P: 'PASS', F: 'FAIL', S: 'SKIP', E: 'ERROR',
@@ -80,7 +81,7 @@ if (!opts.path && !opts.grep) usage('need a test path (starting with "/") or --g
 
 /** Same shape as wpt-diff.js: { "/test.html": { s: "O", c: [pass, total] } }. */
 async function fetchSummary(url) {
-  const res = await fetch(url);
+  const res = await netFetch(url);
   if (!res.ok) throw new Error(`GET ${url} -> ${res.status} ${res.statusText}`);
   const buf = Buffer.from(await res.arrayBuffer());
   const text =

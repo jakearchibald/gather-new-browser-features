@@ -53,6 +53,9 @@
  */
 
 const { StringDecoder } = require('string_decoder');
+// Node's built-in fetch ignores HTTP_PROXY/HTTPS_PROXY, so a proxy-only network
+// looks like broken DNS. See scripts/lib/net.js.
+const { netFetch } = require('./lib/net.js');
 
 const CHANNEL_ALIASES = {
   nightly: 'experimental',
@@ -227,7 +230,7 @@ function parseArgs(argv) {
 }
 
 async function getJSON(url) {
-  const res = await fetch(url);
+  const res = await netFetch(url);
   if (!res.ok) throw new Error(`GET ${url} -> ${res.status} ${res.statusText}`);
   return res.json();
 }
@@ -399,7 +402,7 @@ async function alignedRuns(fromSpec, toSpec, maxCount = 100) {
 async function fetchSubtestMaps(run, wanted) {
   const url = run.raw_results_url;
   if (!url) throw new Error(`run ${run.id} has no raw_results_url`);
-  const res = await fetch(url);
+  const res = await netFetch(url);
   if (!res.ok) throw new Error(`GET ${url} -> ${res.status} ${res.statusText}`);
 
   const out = new Map();
@@ -514,6 +517,37 @@ async function fetchSubtestMaps(run, wanted) {
 }
 
 /**
+ * fetchSubtestMaps, retried.
+ *
+ * A ~330MB transfer gets dropped mid-stream often enough to matter — reliably so
+ * behind a proxy, which reports it as `aborted`. The scan is stateful, so a retry
+ * restarts the stream from the beginning; that costs a few seconds and is far
+ * better than losing the run. Failures are announced rather than swallowed: a
+ * quietly incomplete subtest map would mean features silently missing from the
+ * notes, which is the one outcome this whole file exists to prevent.
+ */
+async function fetchSubtestMapsRetrying(run, wanted, attempts = 3) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fetchSubtestMaps(run, wanted);
+    } catch (err) {
+      if (attempt >= attempts) {
+        throw new Error(
+          `subtest stream for run ${run.id} failed ${attempts}x (last: ${err.message}).\n` +
+            `Re-run, or drop --subtests to get a diff without subtest names — the ` +
+            `inventory will then say loudly that it has none.`,
+        );
+      }
+      process.stderr.write(
+        `note: subtest stream for run ${run.id} failed (${err.message}); ` +
+          `retrying ${attempt + 1}/${attempts}\n`,
+      );
+      await new Promise((r) => setTimeout(r, 1000 * attempt));
+    }
+  }
+}
+
+/**
  * Which subtests changed state, as the vocabulary for naming the feature.
  *
  * When the baseline has no subtests at all — a `newly-running` file that used to
@@ -566,7 +600,7 @@ function subtestDelta(before, after, cap = 25) {
  * fetch() transparently handles the gzip Content-Encoding from GCS.
  */
 async function fetchSummary(run) {
-  const res = await fetch(run.results_url);
+  const res = await netFetch(run.results_url);
   if (!res.ok) {
     throw new Error(`GET ${run.results_url} -> ${res.status} ${res.statusText}`);
   }
@@ -928,10 +962,13 @@ async function main() {
     process.stderr.write(
       `Streaming raw reports for subtest names (${wanted.size} changed files; ~330MB each)...\n`,
     );
-    const [beforeSubtests, afterSubtests] = await Promise.all([
-      fetchSubtestMaps(beforeRun, wanted),
-      fetchSubtestMaps(afterRun, wanted),
-    ]);
+    // Sequential, not Promise.all. Each report is ~330MB and the scan between
+    // chunks is synchronous, so two at once starve each other's socket — behind a
+    // proxy that shows up as a mid-transfer "aborted". Sequential also halves peak
+    // memory, since only one report's subtest map is being built at a time. The
+    // cost is a few seconds of wall clock on a step that runs once per release.
+    const beforeSubtests = await fetchSubtestMapsRetrying(beforeRun, wanted);
+    const afterSubtests = await fetchSubtestMapsRetrying(afterRun, wanted);
     let withNames = 0;
     for (const r of rows) {
       const b = beforeSubtests.get(r.test) || null;

@@ -26,6 +26,7 @@
  */
 
 const fs = require('fs');
+const { netFetch } = require('./lib/net.js');
 
 const RAW = 'https://raw.githubusercontent.com/web-platform-tests/wpt';
 
@@ -93,7 +94,7 @@ async function fetchSource(testPath, revision) {
 
   for (const candidate of candidates) {
     const url = `${RAW}/${revision}/${candidate}`;
-    const res = await fetch(url);
+    const res = await netFetch(url);
     if (res.ok) return { path: candidate, url, text: await res.text() };
   }
   return { path: candidates[0], url: null, text: null };
