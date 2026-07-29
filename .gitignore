@@ -1,0 +1,26 @@
+# Generated artifacts live in tmp/ by default. A diff.json is ~600KB and its
+# contents change daily as new runs land on wpt.fyi, so it's noise in a diff —
+# regenerate with scripts/wpt-diff.js instead of committing one.
+tmp/
+out/
+
+# Same artifacts if written outside tmp/
+diff.json
+diff.txt
+*.diff.json
+*.diff.txt
+*.log
+RELEASE-NOTES.md
+
+# Node
+node_modules/
+npm-debug.log*
+package-lock.json
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp

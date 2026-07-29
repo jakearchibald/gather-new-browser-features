@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Edit(/.claude/skills/wpt-release-notes/**)",
+      "Bash(node scripts/*)",
+      "Bash(mkdir -p tmp)"
+    ]
+  }
+}
