@@ -7,6 +7,10 @@ tmp/
 # land, so publish by copying elsewhere rather than committing.
 release-notes/
 
+# Per-machine Claude Code settings (e.g. defaultMode). Kept out of the committed
+# settings.json so a permission stance doesn't apply to everyone who clones.
+.claude/settings.local.json
+
 # Node
 node_modules/
 npm-debug.log*

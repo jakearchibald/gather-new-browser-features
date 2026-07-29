@@ -12,20 +12,23 @@ Node 18+ required (uses built-in `fetch`). No dependencies.
 
 ```bash
 mkdir -p tmp
-node scripts/wpt-diff.js --from firefox@beta --to firefox@nightly --json --top 25 > tmp/diff.txt
+node scripts/wpt-diff.js --from firefox@beta --to firefox@nightly --subtests --json --top 25 > tmp/diff.txt
 ```
 
-Then read the full inventory, drill into whatever moved, and read the tests before writing
-about them:
+`--subtests` streams both raw reports (~330MB each, ~10s) to record the newly-passing and
+newly-failing subtest *names* per changed file. Those names are what identify a feature; a
+path usually can't. Then read the full inventory, drill into whatever moved, and read the
+tests before writing about them:
 
 ```bash
 D=tmp/firefox-beta-vs-firefox-experimental.diff.json   # --json prints the path it chose
-node scripts/wpt-inventory.js "$D" --checklist          # coverage worksheet — start here
-node scripts/wpt-inventory.js "$D" --dirs               # every directory that moved
-node scripts/wpt-inventory.js "$D"                      # every changed file, grouped
+node scripts/wpt-inventory.js "$D" --checklist tmp/checklist.md   # worksheet — start here
+node scripts/wpt-inventory.js "$D"                      # every changed file + its subtest names
+node scripts/wpt-inventory.js --verify tmp/checklist.md # non-zero while boxes are unticked
 node scripts/wpt-area.js "$D" /fetch                    # what changed in an area
-node scripts/wpt-subtests.js "$D" /fetch/http-cache/no-vary-search.tentative.any.html
+node scripts/wpt-subtests.js "$D" /fetch/http-cache/no-vary-search.tentative.any.html --limit 0
 node scripts/wpt-fetch-tests.js --from-diff "$D" --area /fetch --top 3
+node scripts/wpt-state.js "$D" --grep sound-state       # is there even a test? (diffs can't say)
 ```
 
 Read the inventory in full rather than skimming the biggest numbers. **Subtest count is not
@@ -40,15 +43,17 @@ never under a web-platform directory.
 
 | Script | Purpose |
 | --- | --- |
-| [wpt-diff.js](scripts/wpt-diff.js) | Diff two runs. Prints a report; `--json` writes structured data for the other scripts. |
-| [wpt-inventory.js](scripts/wpt-inventory.js) | Every changed file, grouped by directory, ranked by nothing. `--checklist` turns it into a coverage worksheet with a per-directory verdict. |
+| [wpt-diff.js](scripts/wpt-diff.js) | Diff two runs. Prints a report; `--json` writes structured data for the other scripts, and `--subtests` adds per-file subtest names. |
+| [wpt-inventory.js](scripts/wpt-inventory.js) | Every changed file with its subtest names, grouped by directory, ranked by nothing. `--checklist` writes a coverage worksheet; `--verify` fails while any box is unticked. |
 | [wpt-area.js](scripts/wpt-area.js) | Drill into one path prefix of a diff, or list all regressions/improvements. |
 | [wpt-subtests.js](scripts/wpt-subtests.js) | Diff the individual subtests of one test file, with the assertion message for each failure. Finds the *cause*, not just the count. |
 | [wpt-fetch-tests.js](scripts/wpt-fetch-tests.js) | Fetch WPT test sources so code examples are accurate rather than guessed. |
+| [wpt-state.js](scripts/wpt-state.js) | Absolute pass/fail of a test in both runs, including tests the diff omits. "Not in the diff" never means "not shipped". |
+| [selftest.js](scripts/selftest.js) | Asserts the tooling still surfaces the features it has historically missed. Run it after changing any of the above. |
 
 Each takes `--help`.
 
-Specs for `wpt-diff.js` are `product[@channel]`; channels are `stable`, `beta`,
+Specs for `wpt-diff.js` are `product[@channel][@version]`; channels are `stable`, `beta`,
 `experimental` (aliases `nightly`, `release`, `tp`).
 
 ```bash
@@ -84,6 +89,12 @@ obeying `--top`. Added and removed tests don't count as movement (that's test-su
 not the browser), and nothing is excluded by path — `third_party/test262` clusters are where
 JavaScript and `Intl` features show up. Loosen it with `--cluster-min` and `--cluster-ratio`.
 
+With `--subtests` there is also a **One feature, several directories** section, which does
+the same job on subtest vocabulary instead of paths: a token appearing in newly-passing
+subtest names under two or more directories is probably one change in several places.
+`field-sizing` turned up across `/css/css-cascade`, `/css/css-ui`, `/html/rendering/widgets`
+and `/web-animations`.
+
 ## Interpreting the output
 
 Pass rates find the story; they aren't the story. Push through to the feature name — "the
@@ -104,10 +115,13 @@ that report no subtests, and partial runs published to wpt.fyi.
 
 ```text
 scripts/               the tools
-tmp/                   generated diffs (gitignored — a diff.json is ~600KB and changes daily)
+tmp/                   generated diffs (gitignored — ~2.5MB with --subtests, changes daily)
 release-notes/         finished notes (gitignored — regenerable, and stale as new runs land)
 .claude/skills/        the repeatable workflow
 ```
+
+`selftest.js` needs two diff artifacts to run against; see its `--help` for the two commands
+that generate them.
 
 ## Reference
 

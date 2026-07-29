@@ -40,11 +40,19 @@
  *   --cluster-ratio <r>
  *                   how one-sided a cluster must be, 0-1 (default 0.8). Lower it
  *                   to see directories that moved both ways.
+ *   --subtests      also load the newly-passing/newly-failing subtest NAMES for
+ *                   every changed file, into the --json artifact and the report.
+ *                   Streams both raw reports (~330MB each, tens of seconds). A
+ *                   test path frequently cannot name the feature that shipped;
+ *                   the subtest names can, so this is worth it before writing
+ *                   release notes. Requires --json to be useful downstream.
  *   --aligned       require both runs to be on the same WPT revision, removing
  *                   test-suite churn from the diff (may select older runs)
  *
  * Channel labels understood by wpt.fyi: stable, beta, experimental (== nightly).
  */
+
+const { StringDecoder } = require('string_decoder');
 
 const CHANNEL_ALIASES = {
   nightly: 'experimental',
@@ -147,6 +155,7 @@ function parseArgs(argv) {
     top: 40,
     clusterMin: 4,
     clusterRatio: 0.8,
+    subtests: false,
     aligned: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -189,6 +198,7 @@ function parseArgs(argv) {
         }
         break;
       }
+      case '--subtests': opts.subtests = true; break;
       case '--aligned': opts.aligned = true; break;
       case '-h':
       case '--help':
@@ -368,6 +378,189 @@ async function alignedRuns(fromSpec, toSpec, maxCount = 100) {
 }
 
 /**
+ * Stream a raw report.json and collect the subtests of every test in `wanted`.
+ *
+ * Why this exists: a test path often cannot name the feature that shipped.
+ * `SVGAnimatedEnumeration-SVGTextPathElement.html` going 2/3 -> 3/3 was the
+ * `side` property landing, and nothing in the path says so; `getAnimations.html`
+ * going 29/34 -> 33/34 was `{ pseudoElement }`, and the subtest is literally
+ * named "Returns animations on pseudo-element when it is specified". Both were
+ * missed. Subtest names are the feature vocabulary, and reading them one file at
+ * a time — after already deciding a file looks interesting — means the decision
+ * that loses features is made with the least information available. So load them
+ * for every changed file, up front.
+ *
+ * The reports are ~330MB, so this streams and keeps only `wanted`. It is a
+ * string-aware brace matcher rather than a split on the `{"test":` needle:
+ * splitting is much faster but a needle occurring inside an assertion message
+ * would silently drop a result, and a silent drop is the failure mode this whole
+ * function exists to remove.
+ */
+async function fetchSubtestMaps(run, wanted) {
+  const url = run.raw_results_url;
+  if (!url) throw new Error(`run ${run.id} has no raw_results_url`);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`GET ${url} -> ${res.status} ${res.statusText}`);
+
+  const out = new Map();
+  // Both spacings occur: some reports are pretty-printed, some are not.
+  const NEEDLES = ['{"test": ', '{"test":'];
+  const KEEP_TAIL = Math.max(...NEEDLES.map((n) => n.length));
+
+  let pending = '';
+  let capturing = null; // { buf, depth, inStr, esc }
+  let malformed = 0;
+
+  const handle = (obj) => {
+    if (!obj || typeof obj.test !== 'string' || !wanted.has(obj.test)) return;
+    const map = new Map();
+    for (const s of obj.subtests || []) {
+      map.set(s.name, { status: s.status, message: s.message || null });
+    }
+    out.set(obj.test, { status: obj.status, subtests: map });
+  };
+
+  // `pending` only ever holds an unconsumed seek tail, and is drained here. It
+  // must not be prepended while mid-capture: doing so spliced a stale tail into
+  // the captured object and desynced the scanner, which found 19 of 2587 files
+  // and reported the other 2568 as "legitimately has no raw result".
+  const feed = (text) => {
+    let rest = pending + text;
+    pending = '';
+    while (rest) {
+      if (capturing) {
+        let end = -1;
+        for (let i = 0; i < rest.length; i++) {
+          const ch = rest[i];
+          if (capturing.esc) { capturing.esc = false; continue; }
+          if (ch === '\\' && capturing.inStr) { capturing.esc = true; continue; }
+          if (ch === '"') { capturing.inStr = !capturing.inStr; continue; }
+          if (capturing.inStr) continue;
+          if (ch === '{') capturing.depth++;
+          else if (ch === '}' && --capturing.depth === 0) { end = i; break; }
+        }
+        if (end === -1) {
+          capturing.buf += rest;
+          return;
+        }
+        capturing.buf += rest.slice(0, end + 1);
+        try {
+          handle(JSON.parse(capturing.buf));
+        } catch {
+          malformed++;
+        }
+        capturing = null;
+        rest = rest.slice(end + 1);
+        continue;
+      }
+      let at = -1;
+      for (const n of NEEDLES) {
+        const i = rest.indexOf(n);
+        if (i !== -1 && (at === -1 || i < at)) at = i;
+      }
+      if (at === -1) {
+        // Keep a tail in case a needle straddles the chunk boundary.
+        pending = rest.length > KEEP_TAIL ? rest.slice(-KEEP_TAIL) : rest;
+        return;
+      }
+      capturing = { buf: '', depth: 0, inStr: false, esc: false };
+      rest = rest.slice(at);
+    }
+  };
+
+  const decoder = new StringDecoder('utf8');
+  let gunzip = null;
+  let sniffed = false;
+  let inflateError = null;
+
+  for await (const chunk of res.body) {
+    const buf = Buffer.from(chunk);
+    if (!sniffed) {
+      sniffed = true;
+      // Served with Content-Encoding: gzip *and* stored gzipped, so there is
+      // often still a gzip stream after fetch() strips one layer.
+      if (buf[0] === 0x1f && buf[1] === 0x8b) {
+        gunzip = require('zlib').createGunzip();
+        gunzip.on('data', (d) => feed(decoder.write(d)));
+        gunzip.on('error', (err) => { inflateError = inflateError || err; });
+      }
+    }
+    if (gunzip) {
+      await new Promise((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          gunzip.removeListener('error', finish);
+          resolve();
+        };
+        gunzip.once('error', finish);
+        gunzip.write(buf, finish);
+      });
+    } else {
+      feed(decoder.write(buf));
+    }
+    if (inflateError) break;
+  }
+  if (gunzip) {
+    await new Promise((resolve) => gunzip.end(resolve));
+    gunzip.destroy();
+  }
+  if (inflateError) throw new Error(`could not decompress ${url}: ${inflateError.message}`);
+  if (malformed) {
+    process.stderr.write(`note: ${malformed} unparseable result object(s) in ${run.id}\n`);
+  }
+  return out;
+}
+
+/**
+ * Which subtests changed state, as the vocabulary for naming the feature.
+ *
+ * When the baseline has no subtests at all — a `newly-running` file that used to
+ * be ERROR 0/0 — every passing subtest on the other side is newly passing. That
+ * case is the strongest feature signal in a diff, so it must not come back empty.
+ */
+function subtestDelta(before, after, cap = 25) {
+  const bMap = before ? before.subtests : new Map();
+  const aMap = after ? after.subtests : new Map();
+  const newlyPassing = [];
+  const newlyFailing = [];
+
+  if (!bMap.size && aMap.size) {
+    for (const [name, a] of aMap) {
+      if (a.status === 'PASS') newlyPassing.push({ name, was: null, message: null });
+    }
+  } else {
+    for (const [name, a] of aMap) {
+      const b = bMap.get(name);
+      if (!b) {
+        // Subtest exists only on the compare side. Counted as newly passing only
+        // when it passes: a brand-new assertion that holds is usually the feature.
+        if (a.status === 'PASS') newlyPassing.push({ name, was: null, message: null });
+        continue;
+      }
+      if (a.status === 'PASS' && b.status !== 'PASS') {
+        newlyPassing.push({ name, was: b.status, message: b.message || null });
+      } else if (b.status === 'PASS' && a.status !== 'PASS') {
+        newlyFailing.push({ name, now: a.status, message: a.message || null });
+      }
+    }
+  }
+
+  const trim = (list) => list.slice(0, cap).map((s) => ({
+    ...s,
+    message: s.message ? String(s.message).replace(/\s+/g, ' ').trim().slice(0, 300) : null,
+  }));
+  return {
+    newlyPassing: trim(newlyPassing),
+    newlyFailing: trim(newlyFailing),
+    // The stored arrays are capped; the counts never are, so a truncated list is
+    // always visible as one.
+    counts: { newlyPassing: newlyPassing.length, newlyFailing: newlyFailing.length },
+  };
+}
+
+/**
  * Fetch and decompress a summary_v2 blob.
  * Shape: { "/path/to/test.html": { s: "O", c: [subtest_passes, subtest_total] } }
  * fetch() transparently handles the gzip Content-Encoding from GCS.
@@ -479,6 +672,82 @@ function findClusters(rows, minFiles, oneSidedRatio) {
   return kept
     .map(({ paths, ...c }) => c)
     .sort((a, b) => b.moved - a.moved || Math.abs(b.deltaPass) - Math.abs(a.deltaPass));
+}
+
+// Words that appear in subtest names everywhere and name no feature.
+const STOPWORDS = new Set([
+  'test', 'tests', 'testing', 'the', 'and', 'for', 'with', 'without', 'when', 'then',
+  'should', 'must', 'not', 'from', 'into', 'this', 'that', 'these', 'those', 'has',
+  'have', 'are', 'was', 'were', 'been', 'be', 'is', 'it', 'its', 'in', 'on', 'of',
+  'to', 'a', 'an', 'as', 'at', 'by', 'or', 'if', 'no', 'one', 'two', 'set', 'get',
+  'value', 'values', 'valid', 'invalid', 'element', 'elements', 'property',
+  'properties', 'attribute', 'attributes', 'interface', 'type', 'returns', 'return',
+  'after', 'before', 'via', 'using', 'default', 'empty', 'same', 'different', 'new',
+  'first', 'second', 'child', 'parent', 'html', 'css', 'idl', 'api', 'case', 'cases',
+  // Harness idioms and generic web vocabulary that pass the shape test below but
+  // name no feature: they showed up across 5-19 directories on a real diff.
+  'cross-origin', 'same-origin', 'e.style', 'same-site', 'cross-site', 'user-agent',
+  'top-level', 'non-empty', 'read-only', 'well-formed', 'used-value-equivalent',
+]);
+
+/**
+ * Does this token look like a spec identifier rather than an English word?
+ *
+ * The point is to keep `pseudoElement`, `field-sizing`, `SVGLength` and
+ * `innerHTML` while dropping `Transitions`, `Blob`, `Multiple` and `0.875` — all
+ * of which appeared across 8+ directories on a real diff purely because CSS test
+ * titles are capitalised.
+ */
+function identifierShaped(t) {
+  if (/^[\d.\-]+$/.test(t)) return false;              // 0.125, 1-2
+  if (/[a-z][A-Z]/.test(t)) return true;               // pseudoElement, innerHTML
+  if (/^[A-Z]{2,}[a-z]/.test(t)) return true;          // SVGLength, RTCTransportStats
+  if (/^[A-Z0-9]{3,}$/.test(t)) return true;           // WOFF2, ARIA
+  if (/^[a-z][a-z0-9]*(-[a-z0-9]+)+$/.test(t)) return true; // field-sizing, light-dark
+  if (/^[A-Za-z_$][\w$]{2,}\.[A-Za-z_$]/.test(t)) return true; // Element.attachShadow
+  return false;
+}
+
+/**
+ * Group changed files by the vocabulary of their newly-passing subtests.
+ *
+ * "One feature moves several areas" has been advice up to now, checked by eye.
+ * With subtest names loaded it is mechanical: a token appearing in newly-passing
+ * subtests across two or more directories is one feature showing up in several
+ * places. `pseudoElement` in both /web-animations and /css/css-pseudo is one
+ * change, not two, and grouping by directory can never see that.
+ *
+ * Only runs with --subtests, and only over newly-passing names, because a shared
+ * token among failures is usually a shared precondition rather than a feature.
+ */
+function findVocabulary(rows, minDirs = 2) {
+  const tokens = new Map();
+  for (const r of rows) {
+    if (!r.subtests) continue;
+    const dir = r.test.replace(/^\//, '').split('/').slice(0, -1).join('/');
+    const seen = new Set();
+    for (const s of r.subtests.newlyPassing) {
+      // camelCase and dotted identifiers are the interesting shapes: they are
+      // how specs name properties and methods.
+      for (const raw of String(s.name).split(/[^A-Za-z0-9_.$-]+/)) {
+        const t = raw.replace(/^[.\-]+|[.\-]+$/g, '');
+        if (t.length < 4) continue;
+        const key = t.toLowerCase();
+        if (STOPWORDS.has(key)) continue;
+        if (!identifierShaped(t)) continue;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        if (!tokens.has(key)) tokens.set(key, { token: t, dirs: new Set(), files: [] });
+        const entry = tokens.get(key);
+        entry.dirs.add(dir);
+        entry.files.push(r.test);
+      }
+    }
+  }
+  return [...tokens.values()]
+    .filter((t) => t.dirs.size >= minDirs)
+    .map((t) => ({ token: t.token, dirs: [...t.dirs].sort(), files: t.files.slice(0, 12) }))
+    .sort((a, b) => b.dirs.length - a.dirs.length || a.token.localeCompare(b.token));
 }
 
 /** Top-level WPT directory, used to aggregate per-feature-area. */
@@ -650,12 +919,50 @@ async function main() {
     });
   }
 
+  // Load subtest names for every changed file, so a downstream reader never has
+  // to infer a feature from a path. Done after classification so only changed
+  // files are kept in memory.
+  let subtestCoverage = null;
+  if (opts.subtests) {
+    const wanted = new Set(rows.map((r) => r.test));
+    process.stderr.write(
+      `Streaming raw reports for subtest names (${wanted.size} changed files; ~330MB each)...\n`,
+    );
+    const [beforeSubtests, afterSubtests] = await Promise.all([
+      fetchSubtestMaps(beforeRun, wanted),
+      fetchSubtestMaps(afterRun, wanted),
+    ]);
+    let withNames = 0;
+    for (const r of rows) {
+      const b = beforeSubtests.get(r.test) || null;
+      const a = afterSubtests.get(r.test) || null;
+      if (!b && !a) continue;
+      r.subtests = subtestDelta(b, a);
+      if (r.subtests.counts.newlyPassing || r.subtests.counts.newlyFailing) withNames++;
+    }
+    // A silent extraction failure would hand back a diff that looks complete and
+    // has quietly lost the evidence, so say what was and wasn't found.
+    const found = rows.filter((r) => beforeSubtests.has(r.test) || afterSubtests.has(r.test)).length;
+    subtestCoverage = { changed: rows.length, found, withNames };
+    process.stderr.write(
+      `Subtest names: ${found}/${rows.length} changed files located in the raw reports, ` +
+        `${withNames} with a state change.\n`,
+    );
+    if (found < rows.length) {
+      process.stderr.write(
+        `note: ${rows.length - found} changed file(s) had no raw result — reftests and ` +
+          `skipped tests legitimately have none.\n`,
+      );
+    }
+  }
+
   const beforeStats = summarise(beforeSummary);
   const afterStats = summarise(afterSummary);
 
   const report = {
     generated: new Date().toISOString(),
     aligned: opts.aligned,
+    subtestCoverage,
     before: {
       spec: opts.fromSpec.label,
       product: beforeRun.browser_name,
@@ -700,6 +1007,7 @@ async function main() {
           y.statusFixed + y.statusBroken - (x.statusFixed + x.statusBroken),
       ),
     clusters: findClusters(rows, opts.clusterMin, opts.clusterRatio),
+    vocabulary: opts.subtests ? findVocabulary(rows) : null,
     tests: rows.sort((x, y) => Math.abs(y.deltaPass) - Math.abs(x.deltaPass) || x.test.localeCompare(y.test)),
   };
 
@@ -819,6 +1127,18 @@ async function main() {
       const churn = c.churn ? `  (+${c.churn} new/gone)` : '';
       L(`  ${String(c.moved).padStart(4)} files  ${signed(c.deltaPass).padStart(7)} subtests  ${dir.padEnd(14)} /${c.dir}${churn}`);
     }
+    L('');
+  }
+
+  if (report.vocabulary && report.vocabulary.length) {
+    L('## One feature, several directories (shared newly-passing subtest words)');
+    L('# Mechanical version of "group by feature, not by directory": each token');
+    L('# below appears in newly-passing subtest names under 2+ directories, so it is');
+    L('# probably one change surfacing in several places. Report it once.');
+    for (const v of report.vocabulary.slice(0, 25)) {
+      L(`  ${v.token.padEnd(28)} ${v.dirs.length} dirs: ${v.dirs.slice(0, 4).map((d) => `/${d}`).join(' ')}${v.dirs.length > 4 ? ' …' : ''}`);
+    }
+    if (report.vocabulary.length > 25) L(`  ... and ${report.vocabulary.length - 25} more (see --json)`);
     L('');
   }
 
