@@ -169,6 +169,29 @@ cases.push({
       return null;
     });
 
+    // Reading master rather than the revision under test silently substitutes
+    // today's source for the one that produced the result being described.
+    check('151-152: test sources are read at the run revision, not master', () => {
+      // Deleted between these two runs: 200 at the baseline revision, 404 on master.
+      const GONE = '/html/syntax/parsing/parse-processing-instruction.tentative.html';
+      if (!diff.tests.some((t) => t.test === GONE && t.kind === 'removed')) {
+        return `${GONE} is no longer 'removed' in this diff — pick another deleted test`;
+      }
+      const out = run('wpt-fetch-tests.js', ['--from-diff', file, GONE, '--head', '2']);
+      if (/could not fetch/.test(out)) return 'fell back to master and lost the source';
+      const sha = (diff.before.results_url.match(/\/([0-9a-f]{40})\//) || [])[1];
+      return out.includes(sha) ? null : `fetched from the wrong ref:\n${out.split('\n')[2]}`;
+    });
+
+    // The skill says to search test CONTENTS, not paths. wpt-grep is that step.
+    check('151-152: wpt-grep finds a feature by subtest name, with no network', () => {
+      const out = run('wpt-grep.js', [file, 'pseudoElement', '--limit', '5']);
+      const section = out.split('## Test paths')[0];
+      return /getAnimations\.html/.test(section)
+        ? null
+        : 'pseudoElement not found in the subtest-name layer';
+    });
+
     // A feature can ship across several directories; the vocabulary section is
     // the mechanical version of "group by feature, not by directory".
     check('151-152: field-sizing is linked across multiple directories', () => {

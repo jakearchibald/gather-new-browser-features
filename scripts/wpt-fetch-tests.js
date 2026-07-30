@@ -15,11 +15,25 @@
  *   node wpt-fetch-tests.js --from-diff diff.json --area /fetch --head 60
  *
  * Options:
- *   --from-diff <f>  pick tests from a diff.json instead of listing them
- *   --area <prefix>  with --from-diff, restrict to this path prefix
- *   --top <n>        with --from-diff, take the n biggest movers (default 5)
+ *   --from-diff <f>  read the diff for revision context, and — when no explicit
+ *                    paths are given — pick the biggest movers from it
+ *   --area <prefix>  with --from-diff and no explicit paths, restrict the pick
+ *   --top <n>        with --from-diff and no explicit paths, how many (default 5)
  *   --head <n>       print only the first n lines of each file (default 60; 0 = all)
- *   --revision <r>   git ref to fetch from (default: master)
+ *   --revision <r>   git ref to fetch from. Default: the WPT revision the runs were
+ *                    at, taken from the diff. Without a diff, master.
+ *
+ * READ THE REVISION THE RUN WAS AT, NOT master. The default used to be master,
+ * which silently reads whatever the test says today rather than what produced the
+ * result you are describing. That is not hypothetical: between Firefox 151 and 152,
+ * html/syntax/parsing/parse-processing-instruction.tentative.html is 200 at the
+ * run's revision and 404 on master, so the tool reported "could not fetch — the
+ * test may be generated or renamed" for a test that exists perfectly well. A test
+ * that was *rewritten* rather than deleted is worse: it fetches fine and you copy a
+ * code example that never produced the result in your notes.
+ *
+ * Which side's revision depends on the test. A fix is read at the `after` revision;
+ * a test the diff reports as `removed` only exists at `before`.
  *
  * Note: .any.js tests generate several .html variants. Given "foo.any.worker.html"
  * this fetches the underlying "foo.any.js", which is the file with the real content.
@@ -27,8 +41,7 @@
 
 const fs = require('fs');
 const { netFetch } = require('./lib/net.js');
-
-const RAW = 'https://raw.githubusercontent.com/web-platform-tests/wpt';
+const { RAW, toSourcePath, revisionResolver, sourceCandidates } = require('./lib/wpt.js');
 
 function usage(msg) {
   if (msg) console.error(`error: ${msg}\n`);
@@ -39,7 +52,9 @@ function usage(msg) {
 const argv = process.argv.slice(2);
 if (!argv.length || argv.includes('-h') || argv.includes('--help')) usage();
 
-const opts = { fromDiff: null, area: null, top: 5, head: 60, revision: 'master' };
+// revision stays null until resolved: null means "derive it from the diff", which
+// can only be done once the diff is loaded.
+const opts = { fromDiff: null, area: null, top: 5, head: 60, revision: null };
 const paths = [];
 // Unvalidated Number() would turn a typo into a silently empty listing.
 const num = (flag, raw) => {
@@ -62,35 +77,9 @@ for (let i = 0; i < argv.length; i++) {
   }
 }
 
-/**
- * Strip the generated-variant suffixes and query strings that appear in results
- * but are not real files in the repo.
- *   /foo.any.worker.html?vp9  ->  /foo.any.js
- *   /bar.https.any.html       ->  /bar.https.any.js
- *   /baz.window.html          ->  /baz.window.js
- *
- * A `.any.js` test generates one .html per global in its `// META: global=` line,
- * and tools/manifest/sourcefile.py keeps adding globals — worker-module,
- * sharedworker-module, serviceworker-module, window-module and six
- * shadowrealm-in-* variants all exist. Matching any single segment rather than a
- * fixed list stops each new global from silently 404ing. fetchSource() still
- * falls back to the literal path, so a real file that happens to look like a
- * variant is not lost.
- */
-function toSourcePath(testPath) {
-  let p = testPath.split('?')[0];
-  p = p.replace(/\.any\.[^./]+\.html$/, '.any.js');
-  p = p.replace(/\.any\.html$/, '.any.js');
-  p = p.replace(/\.window\.html$/, '.window.js');
-  p = p.replace(/\.worker\.html$/, '.worker.js');
-  return p.replace(/^\//, '');
-}
-
 async function fetchSource(testPath, revision) {
-  const candidates = [toSourcePath(testPath)];
-  // If we rewrote to a .js generator, keep the literal .html as a fallback.
-  const literal = testPath.split('?')[0].replace(/^\//, '');
-  if (!candidates.includes(literal)) candidates.push(literal);
+  // Rewritten .js generator first, literal .html as a fallback.
+  const candidates = sourceCandidates(testPath);
 
   for (const candidate of candidates) {
     const url = `${RAW}/${revision}/${candidate}`;
@@ -102,33 +91,51 @@ async function fetchSource(testPath, revision) {
 
 async function main() {
   let targets = paths;
+  let revisionFor = () => opts.revision || 'master';
 
   if (opts.fromDiff) {
     if (!fs.existsSync(opts.fromDiff)) usage(`no such file: ${opts.fromDiff}`);
     const report = JSON.parse(fs.readFileSync(opts.fromDiff, 'utf8'));
-    let tests = report.tests;
-    if (opts.area) {
-      const p = opts.area.replace(/\/$/, '');
-      tests = tests.filter((t) => t.test === p || t.test.startsWith(p + '/'));
+
+    if (!opts.revision) {
+      const resolve = revisionResolver(report);
+      revisionFor = (t) => resolve(t) || 'master';
     }
-    // Biggest absolute movers explain the area; dedupe by source file so the
-    // .any.js variants of one test don't consume the whole budget.
-    const seen = new Set();
-    const picked = [];
-    for (const t of tests.sort((a, b) => Math.abs(b.deltaPass) - Math.abs(a.deltaPass))) {
-      const src = toSourcePath(t.test);
-      if (seen.has(src)) continue;
-      seen.add(src);
-      picked.push(t.test);
-      if (picked.length >= opts.top) break;
+
+    // Only auto-pick when no paths were named. Concatenating both meant that
+    // `--from-diff D /some/path` fetched that path *plus* five unrelated movers,
+    // so a diff could not be supplied purely for revision context.
+    if (!paths.length) {
+      let tests = report.tests;
+      if (opts.area) {
+        const p = opts.area.replace(/\/$/, '');
+        tests = tests.filter((t) => t.test === p || t.test.startsWith(p + '/'));
+      }
+      // Biggest absolute movers explain the area; dedupe by source file so the
+      // .any.js variants of one test don't consume the whole budget.
+      const seen = new Set();
+      const picked = [];
+      for (const t of tests.sort((a, b) => Math.abs(b.deltaPass) - Math.abs(a.deltaPass))) {
+        const src = toSourcePath(t.test);
+        if (seen.has(src)) continue;
+        seen.add(src);
+        picked.push(t.test);
+        if (picked.length >= opts.top) break;
+      }
+      targets = picked;
     }
-    targets = targets.concat(picked);
+  } else if (!opts.revision) {
+    process.stderr.write(
+      `note: no diff given, so reading master. master is not necessarily what the runs\n` +
+        `      were tested at — pass --from-diff <diff.json> to pin the revision, or\n` +
+        `      --revision <sha> explicitly.\n`,
+    );
   }
 
   if (!targets.length) usage('no tests specified');
 
   for (const t of targets) {
-    const { path: src, url, text } = await fetchSource(t, opts.revision);
+    const { path: src, url, text } = await fetchSource(t, revisionFor(t));
     console.log(`${'#'.repeat(70)}`);
     console.log(`# ${t}`);
     if (url) console.log(`# ${url}`);

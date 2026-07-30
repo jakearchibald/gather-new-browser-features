@@ -71,6 +71,9 @@ for (let i = 0; i < argv.length; i++) {
     }
     default:
       if (a.startsWith('-')) usage(`unknown option ${a}`);
+      // An existing local file is the diff. "starts with /" cannot tell them apart,
+      // because an absolute diff path starts with / as well.
+      else if (fs.existsSync(a) && fs.statSync(a).isFile() && !opts.file) opts.file = a;
       else if (a.startsWith('/')) opts.path = a;
       else if (!opts.file) opts.file = a;
       else usage(`unexpected argument ${a}`);

@@ -50,7 +50,8 @@ never under a web-platform directory.
 | [wpt-inventory.js](scripts/wpt-inventory.js) | Every changed file with its subtest names, grouped by directory, ranked by nothing. `--checklist` writes a coverage worksheet; `--verify` fails while any box is unticked. |
 | [wpt-area.js](scripts/wpt-area.js) | Drill into one path prefix of a diff, or list all regressions/improvements. |
 | [wpt-subtests.js](scripts/wpt-subtests.js) | Diff the individual subtests of one or more test files, with the assertion message for each failure. Finds the *cause*, not just the count. Pass every path to one invocation — each call streams two ~330MB reports and scans them in a single pass. |
-| [wpt-fetch-tests.js](scripts/wpt-fetch-tests.js) | Fetch WPT test sources so code examples are accurate rather than guessed. |
+| [wpt-fetch-tests.js](scripts/wpt-fetch-tests.js) | Fetch WPT test sources so code examples are accurate rather than guessed. Pass `--from-diff` to read them at the revision the runs were tested at, not `master`. |
+| [wpt-grep.js](scripts/wpt-grep.js) | Search a diff for a keyword in subtest names and messages (free), paths (free), then test source (`--sources`). A filename often contains no word from the feature's name. |
 | [wpt-state.js](scripts/wpt-state.js) | Absolute pass/fail of a test in both runs, including tests the diff omits. "Not in the diff" never means "not shipped". |
 | [selftest.js](scripts/selftest.js) | Asserts the tooling still surfaces the features it has historically missed. Run it after changing any of the above. |
 

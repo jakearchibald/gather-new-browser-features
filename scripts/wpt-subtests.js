@@ -85,7 +85,12 @@ let diffPath = null;
 // Several test paths are accepted and resolved in ONE pass over each report.
 const testPaths = [];
 for (const p of positional) {
-  if (p.startsWith('/')) testPaths.push(p);
+  // "starts with /" cannot separate these: an absolute diff path starts with / too,
+  // so `wpt-subtests.js /abs/path/diff.json /test.html` silently treated the diff as
+  // a test path, searched the report for it, and then complained there was no diff.
+  // An existing file on disk is the diff; a WPT test path is not a local file.
+  if (fs.existsSync(p) && fs.statSync(p).isFile()) diffPath = p;
+  else if (p.startsWith('/')) testPaths.push(p);
   else diffPath = p;
 }
 if (!testPaths.length) usage('need at least one test path (starts with "/")');

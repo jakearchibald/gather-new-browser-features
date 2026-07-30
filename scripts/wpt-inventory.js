@@ -554,6 +554,19 @@ if (hasEvidence) {
   L('"+" / "-" lines are the subtest names that changed state: that is the feature');
   L('vocabulary, so read those rather than inferring anything from the filename.');
 }
+if (!opts.dirs) {
+  // Loading subtest names made this listing several times longer, and the obvious
+  // response is to page it by line number and strip the "+" lines to fit more on
+  // screen. That throws away the 53% of the file that names features, and a line
+  // window cuts across directories so a directory shows up with only some of its
+  // files. Both alternatives below are bounded and lose nothing.
+  L('');
+  L(`This is ${groups.length} directories and ${tests.length} files — thousands of lines. Navigate`);
+  L('it with the flags, not by paging raw line numbers or grepping out the evidence:');
+  L('  --dirs               one line per directory: the map');
+  L('  --include <path>     one area in full, evidence intact (repeatable)');
+  L('  --checklist <file>   a worksheet with a verdict per directory and per file');
+}
 L('');
 
 for (const g of groups) {

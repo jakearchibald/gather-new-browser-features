@@ -280,8 +280,16 @@ unambiguously locale emulation reaching shared workers. When they don't, you hav
 
 ```bash
 node scripts/wpt-fetch-tests.js --from-diff $D --area /webtransport --top 3
-node scripts/wpt-fetch-tests.js /css/css-values/progress-computed.html --head 80
+node scripts/wpt-fetch-tests.js --from-diff $D /css/css-values/progress-computed.html --head 80
 ```
+
+**Always pass `--from-diff`**, even when naming the path yourself. It pins the fetch
+to the WPT revision the runs were tested at; without it you get `master`, which is
+whatever the test says *today* rather than what produced the result you are
+describing. Between 151 and 152, `parse-processing-instruction.tentative.html` is
+present at the run's revision and 404 on `master` — and a test that was *rewritten*
+rather than deleted is worse, because it fetches cleanly and the snippet you copy
+never produced your result.
 
 This handles `.any.js` generated variants (`foo.any.worker.html` → `foo.any.js`).
 Every snippet in the notes should trace to a test that now passes. This is the single
@@ -408,18 +416,25 @@ A common follow-up is not "what changed?" but "is *this* in the release?" — so
 changelog entry, a bug number, or a half-memory, and wants it verified against the data.
 This is a different search from step 2 and has its own failure modes.
 
-**Search subtest names, not just paths.** A filename may contain no word from the claim.
-With `--subtests` the inventory carries the vocabulary, so grep that first, then the sources:
+**Search subtest names and source, not just paths.** `wpt-grep.js` does all three layers,
+cheapest first — subtest names and messages from the diff (free), then paths (free), then
+test source with `--sources`:
 
 ```bash
-node scripts/wpt-inventory.js $D | grep -i -B6 '<keyword>'
-node scripts/wpt-fetch-tests.js <candidate-path> --head 0 | grep -n '<api-name>'
+node scripts/wpt-grep.js $D pseudoElement                              # free, usually enough
+node scripts/wpt-grep.js $D ':muted' --sources --include /css/selectors
+WPT_CHECKOUT=~/src/wpt node scripts/wpt-grep.js $D 'sound-state' --sources
 ```
+
+The first layer is the one that finds things paths can't: `getAnimations({ pseudoElement })`
+is named by its subtest, not its filename. Without a checkout, `--sources` fetches each
+candidate and so is capped — it says loudly how many it searched, because a bounded "no
+match" is not a "no match". **Then confirm via the assertion messages** — see "a matching
+directory name is not evidence" in step 3.
 
 A `:muted` pseudo-class change lives in `css/selectors/media/sound-state.html`; a path grep
 for "muted" finds `muted-playbackrate.tentative.html`, which is about `playbackRate` and
-unrelated. **Then confirm via the assertion messages** — see "a matching directory name is
-not evidence" in step 3.
+unrelated.
 
 There are four honest answers, and three of them are not "yes":
 
