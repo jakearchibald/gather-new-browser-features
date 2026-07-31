@@ -1,11 +1,12 @@
 /**
  * Stream a raw wptreport and pull out the result objects for a set of test paths.
  *
- * This lived in two places — wpt-diff.js and wpt-subtests.js — and each copy grew
- * its own bugs: one spliced a stale seek-tail into a captured object and reported
- * 19 of 2587 files as "legitimately absent", the other swallowed inflate errors so
- * a decode failure surfaced as "test not present". Tricky streaming code with two
- * implementations means fixing each bug twice, so there is now one.
+ * This once lived in two places — the diff and the per-file drill-in — and each
+ * copy grew its own bugs: one spliced a stale seek-tail into a captured object and
+ * reported 19 of 2587 files as "legitimately absent", the other swallowed inflate
+ * errors so a decode failure surfaced as "test not present". Tricky streaming code
+ * with two implementations means fixing each bug twice, so there is now one, and
+ * only wpt-collect.js calls it.
  *
  * The reports are ~330MB and far too big to JSON.parse whole, so this exploits
  * their shape: `results` is an array of objects each beginning `{"test": "<path>"`.

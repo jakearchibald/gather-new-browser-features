@@ -26,12 +26,15 @@
   },
   "permissions": {
     "allow": [
-      "Bash(node scripts/wpt-diff.js *)",
+      "Bash(node scripts/wpt-runs.js *)",
+      "Bash(node scripts/wpt-collect.js *)",
       "Bash(node scripts/wpt-inventory.js *)",
-      "Bash(node scripts/wpt-area.js *)",
+      "Bash(node scripts/wpt-report.js *)",
       "Bash(node scripts/wpt-subtests.js *)",
+      "Bash(node scripts/wpt-grep.js *)",
       "Bash(node scripts/wpt-fetch-tests.js *)",
       "Bash(node scripts/wpt-state.js *)",
+      "Bash(node scripts/wpt-resolve.js *)",
       "Bash(node scripts/selftest.js *)",
       "Bash(mkdir -p tmp)",
       "Bash(mkdir -p release-notes)",

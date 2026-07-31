@@ -1,326 +1,244 @@
 #!/usr/bin/env node
 /**
- * Diff the *individual subtests* of one test file between two runs, with the
- * assertion message for each failure.
+ * Every subtest of one or more test files, with the assertion message behind each
+ * change. Local and instant — wpt-collect.js already streamed the raw reports.
  *
- * Why this exists: a subtest count tells you a file moved; it does not tell you why.
- * "getComputedTiming() 26/41 -> 41/41" reads like fifteen timing fixes. The subtest
- * messages showed all fifteen were one missing property — startTime was `undefined`,
- * and because it is the first assertion in ten of those tests, that single line failed
- * them all. The count cannot distinguish "15 bugs fixed" from "1 bug fixed, 15 tests
- * unblocked", and those are different release notes.
+ * Why this exists: a subtest count tells you a file moved; it does not tell you
+ * why. "getComputedTiming() 26/41 -> 41/41" reads like fifteen timing fixes. The
+ * subtest messages showed all fifteen were one missing property — startTime was
+ * `undefined`, and because it is the first assertion in ten of those tests, that
+ * single line failed them all. The count cannot distinguish "15 bugs fixed" from
+ * "1 bug fixed, 15 tests unblocked", and those are different release notes.
  *
  * Names and messages also give you the vocabulary developers search for: property
  * names, method names, the actual expected-vs-got values.
  *
  * Usage:
- *   node wpt-subtests.js <diff.json> <test-path> [<test-path> ...]
- *   node wpt-subtests.js --before <run_id> --after <run_id> <test-path> ...
+ *   node wpt-subtests.js <artifact-dir> <test-path> [<test-path> ...]
  *
- *   node wpt-subtests.js diff.json /web-animations/interfaces/AnimationEffect/getComputedTiming.html
- *   node wpt-subtests.js diff.json /css/css-color/parsing/color-valid-color-mix-function.html --limit 40
- *   node wpt-subtests.js diff.json /fetch/http-cache/no-vary-search.tentative.any.html --all
- *
- * PASS SEVERAL PATHS AT ONCE. Each invocation streams two ~330MB reports, and they
- * are scanned in a single pass, so N paths in one call costs what one path costs.
- * A shell loop calling this once per path pays that download N times over — three
- * paths that way is ~4GB, and doubling it again by piping the same call into `head`
- * and then re-running it for the rollup.
- *
- * Often you need neither: if the diff was built with `wpt-diff.js --subtests`, the
- * newly-passing/failing names and messages are already in it, and
- * `wpt-inventory.js <diff.json> --include <path>` reads them locally with no
- * network at all. Reach for this script for the full message rollup, for more than
- * the 25 names the diff stores per file, or for unchanged-failure context.
+ *   node wpt-subtests.js tmp/ff-153-vs-154 /web-animations/interfaces/AnimationEffect/getComputedTiming.html
+ *   node wpt-subtests.js tmp/ff-153-vs-154 /path/one.html /path/two.html /path/three.html
+ *   node wpt-subtests.js tmp/ff-153-vs-154 --grep supported-stats
  *
  * Options:
- *   --before <id>  run id for the baseline (default: from diff.json)
- *   --after <id>   run id for the comparison (default: from diff.json)
- *   --limit <n>    max subtests to print per section (default 25; 0 = all)
- *   --all          list every subtest, not just the ones that changed
- *   --messages     show messages for unchanged failures too (default: only changes)
+ *   --grep <s>    run over every changed test whose path contains <s>, instead of
+ *                 naming paths exactly. Handy when the ?query variant is fiddly.
+ *   --match <s>   show only subtests whose NAME or MESSAGE matches, within each
+ *                 file. Use this instead of piping to sed/head — see below.
+ *   --only <c,..> show only these transition categories: newly-passing,
+ *                 newly-failing, changed, removed, still-failing. Use this instead
+ *                 of grepping for an arrow — see below.
+ *   --part <n>    which page of the output (default 1). A busy file renders to more
+ *                 than the tool output limit — 66KB for one 213-fix file — so it is
+ *                 paged. Breaks fall between subtests, never inside one, and every
+ *                 page repeats its file's synopsis so it stands alone. Each page
+ *                 says what has not been read yet.
+ *   --all         emit every page at once, ignoring the budget. For deliberate
+ *                 redirection to a file, not for reading inline.
+ *   --limit <n>   max rows per section (default 0 = all). Raising this above 0 is
+ *                 almost always a mistake — see below.
  *
- * Note: this reads the *raw* report.json, not the summary blob. Those reports are
- * large (100MB+), so the fetch is streamed and filtered to the one test path and
- * discarded as it goes. One test file at a time, by design.
+ * Run from the repository root. The Bash tool's working directory persists between
+ * calls, so one earlier `cd` makes `node scripts/...` unresolvable afterwards —
+ * which is a shell failure before this script starts, not something it can report.
+ * Artifact discovery itself is cwd-independent.
+ *
+ * READ EVERY LINE. Do not pipe this through `head`, `tail` or a `sed` range when
+ * deciding what a file means. It is the one mistake that produces a *confidently
+ * wrong* finding rather than a visible gap, because you have the right file so
+ * nothing feels missing. A real pass read webrtc-stats/supported-stats.https.html's
+ * 24 new subtests via `tail -35`, saw the last 6 (candidate stats), wrote up
+ * exactly those, and missed the 12 RTCTransportStats properties (dtlsCipher,
+ * dtlsRole, tlsVersion, srtpCipher, …) in the middle — a whole stats type newly
+ * reported, not IDL polish. Long output is information about a file's importance,
+ * not a reason to sample it.
+ *
+ * A `sed` range is worse than `head`, because it fails *quietly*. Slicing
+ * color-computed-color-mix-function.html with `sed -n '/color-mix/,/^====/p'`
+ * looks reasonable and silently drops the header, the section titles and the
+ * synopsis — nearly every subtest name contains "color-mix", so the range keeps
+ * restarting and the output arrives mangled but plausible.
+ *
+ * When you want a bounded read, bound it with --match, which filters on meaning
+ * rather than on line position and always reports the file's true totals:
+ *
+ *   node wpt-subtests.js $D /css/css-color/parsing/color-computed-color-mix-function.html --match '0%'
+ *
+ * DO NOT GREP FOR AN ARROW to get "just the newly-passing". `grep 'FAIL    -> PASS'`
+ * is lossy in a way you cannot see: it misses a subtest that was NOTRUN or TIMEOUT
+ * before, and misses `(new)   -> PASS` — a brand-new assertion that holds —
+ * entirely. That last omission is how an ENTIRELY NEW interface appears, so the
+ * pattern fails hardest on exactly the kind of claim it gets used to check. On one
+ * real diff it under-reported in 19 files, hiding 55 new-subtest passes and 13
+ * non-FAIL priors out of 1018. It also throws away the `was:` message lines, which
+ * are the reason this command exists.
+ *
+ *   node wpt-subtests.js $D <path> --only newly-passing
+ *
+ * If you truly must grep, `-> PASS` is the sound pattern and `FAIL    -> PASS` is
+ * not — but you will still lose the messages and the synopsis.
+ *
+ * Account for ALL of them. If a file gained 24 subtests, your description should
+ * cover what all 24 were about even if you only write up the interesting ones. A
+ * file whose subtests fall into two or three distinct groups is two or three
+ * findings. Before moving on, ask: which subtests have I not accounted for?
+ *
+ * Read the rollup at the end:
+ *   - One message dominating  -> one bug. Name it, give the reproducing example,
+ *     and do NOT enumerate the tests.
+ *   - Several distinct messages -> several fixes; group by message, not by file.
+ *   - A matching directory name is not evidence. The question is never "did this
+ *     directory move?" but "do the assertion messages describe *this* behaviour?"
  */
 
-const fs = require('fs');
-const { netFetch } = require('./lib/net.js');
-const { extractResults } = require('./lib/report.js');
+const { usage, num, unknownOption } = require('./lib/cli.js');
+const artifact = require('./lib/artifact.js');
+const { shellArg, quotingAdvice } = require('./lib/wpt.js');
+const { renderFiles, CATEGORIES, grepFragment } = require('./lib/render.js');
 
-function usage(msg) {
-  if (msg) console.error(`error: ${msg}\n`);
-  console.error(fs.readFileSync(__filename, 'utf8').split('*/')[0].replace(/^#!.*\n/, ''));
-  process.exit(msg ? 1 : 0);
-}
+const fail = (msg) => usage(__filename, msg);
 
 const argv = process.argv.slice(2);
-if (!argv.length || argv.includes('-h') || argv.includes('--help')) usage();
+if (!argv.length || argv.includes('-h') || argv.includes('--help')) usage(__filename);
 
-const opts = { before: null, after: null, limit: 25, all: false, messages: false };
-const positional = [];
-// Unvalidated Number() would turn a typo into a silently truncated report.
-const num = (flag, raw) => {
-  const n = Number(raw);
-  if (raw === undefined) usage(`missing value for ${flag}`);
-  if (!Number.isFinite(n)) usage(`${flag} needs a number, got "${raw}"`);
-  return n;
-};
+const opts = { dir: null, limit: 0, grep: [], match: null, only: null, part: 1, all: false };
+const testPaths = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   switch (a) {
-    case '--before': opts.before = argv[++i]; break;
-    case '--after': opts.after = argv[++i]; break;
-    case '--limit': opts.limit = num(a, argv[++i]); break;
+    case '--limit': opts.limit = num(fail, a, argv[++i]); break;
+    // Repeatable, and ADDITIVE with explicit paths. It used to replace them, so a
+    // command could not mix "these two exact files" with "and whatever matches this
+    // substring" — which is precisely what you want when one of the three paths you
+    // care about is a `?exclude=(a|b|c)` variant you would rather not type.
+    case '--grep': opts.grep.push(String(argv[++i] || '')); break;
+    case '--match': opts.match = argv[++i]; break;
+    case '--part': opts.part = num(fail, a, argv[++i]); break;
     case '--all': opts.all = true; break;
-    case '--messages': opts.messages = true; break;
+    case '--only': {
+      const raw = String(argv[++i] || '').split(',').map((s) => s.trim()).filter(Boolean);
+      if (!raw.length) fail(`--only needs at least one of: ${CATEGORIES.join(', ')}`);
+      const bad = raw.filter((c) => !CATEGORIES.includes(c));
+      if (bad.length) fail(`unknown --only category "${bad[0]}" (choose from: ${CATEGORIES.join(', ')})`);
+      opts.only = new Set(raw);
+      break;
+    }
     default:
-      if (a.startsWith('--')) usage(`unknown option ${a}`);
-      positional.push(a);
+      if (a.startsWith('-')) fail(unknownOption(__filename, a));
+      // A WPT test path always starts with "/" and is never a local directory;
+      // anything else is the artifact. Checking the filesystem first would
+      // misclassify an absolute artifact path, which also starts with "/".
+      else if (a.startsWith('/') && !require('fs').existsSync(a)) testPaths.push(a);
+      else if (!opts.dir) opts.dir = a;
+      else testPaths.push(a);
   }
 }
-
-let diffPath = null;
-// Several test paths are accepted and resolved in ONE pass over each report.
-const testPaths = [];
-for (const p of positional) {
-  // "starts with /" cannot separate these: an absolute diff path starts with / too,
-  // so `wpt-subtests.js /abs/path/diff.json /test.html` silently treated the diff as
-  // a test path, searched the report for it, and then complained there was no diff.
-  // An existing file on disk is the diff; a WPT test path is not a local file.
-  if (fs.existsSync(p) && fs.statSync(p).isFile()) diffPath = p;
-  else if (p.startsWith('/')) testPaths.push(p);
-  else diffPath = p;
-}
-if (!testPaths.length) usage('need at least one test path (starts with "/")');
-
-async function getJSON(url) {
-  const res = await netFetch(url);
-  if (!res.ok) throw new Error(`GET ${url} -> ${res.status} ${res.statusText}`);
-  return res.json();
+if (!testPaths.length && !opts.grep.length) {
+  fail('need at least one test path, or --grep <substring>');
 }
 
-/** Resolve the two run ids, from explicit flags or a diff.json. */
-function resolveRunIds() {
-  if (opts.before && opts.after) {
-    return { before: opts.before, after: opts.after, label: null };
-  }
-  // Honouring only the pair meant that one of them alone was silently dropped in
-  // favour of the diff.json's run ids, comparing runs the user didn't ask for.
-  if (opts.before || opts.after) {
-    usage(
-      `--before and --after must be given together ` +
-        `(got only ${opts.before ? '--before' : '--after'})`,
-    );
-  }
-  if (!diffPath) {
-    usage('need either a diff.json or both --before and --after run ids');
-  }
-  const diff = JSON.parse(fs.readFileSync(diffPath, 'utf8'));
-  if (!diff.before?.run_id || !diff.after?.run_id) {
-    throw new Error(`${diffPath} has no run ids — regenerate it with a current wpt-diff.js`);
-  }
-  return {
-    before: String(diff.before.run_id),
-    after: String(diff.after.run_id),
-    label: {
-      before: `${diff.before.spec} ${diff.before.browser_version}`,
-      after: `${diff.after.spec} ${diff.after.browser_version}`,
-    },
-  };
+const { report } = artifact.load(opts.dir, fail);
+const changed = report.tests.filter((r) => r.kind !== 'unchanged');
+const byPath = new Map(changed.map((r) => [r.test, r]));
+
+// Explicit paths first, then every --grep match, deduped so naming a path and also
+// matching it does not print it twice.
+const rows = [];
+const taken = new Set();
+const add = (r) => {
+  if (!r || taken.has(r.test)) return;
+  taken.add(r.test);
+  rows.push(r);
+};
+for (const p of testPaths) add(byPath.get(p));
+const missing = testPaths.filter((p) => !byPath.has(p));
+
+const unmatched = [];
+for (const g of opts.grep) {
+  const needle = g.toLowerCase();
+  const hits = changed.filter((r) => r.test.toLowerCase().includes(needle));
+  if (!hits.length) unmatched.push(g);
+  for (const r of hits) add(r);
 }
 
-/**
- * Subtests for a set of test paths, from one run's raw report — in a single pass.
- *
- * Taking several paths at once matters: the shape that invites itself is a shell
- * loop calling this script once per path, and each call streams two ~330MB
- * reports. Three paths that way is ~4GB to answer a question about three files.
- */
-async function fetchSubtests(runId, wantPaths) {
-  const runs = await getJSON(`https://wpt.fyi/api/runs?run_ids=${runId}`);
-  if (!runs.length) throw new Error(`no run found for id ${runId}`);
-  const run = runs[0];
-  const url = run.raw_results_url;
-  if (!url) throw new Error(`run ${runId} has no raw_results_url`);
-  const { results } = await extractResults(url, new Set(wantPaths), { label: `run ${runId}` });
-  return { run, results };
+// Said at the point of use, because the prompt has already happened by the time this
+// runs and the only thing left to fix is the next command.
+const countMatches = (p) => changed.filter((r) => r.test.toLowerCase().includes(p.toLowerCase())).length;
+for (const g of opts.grep) {
+  for (const line of quotingAdvice('--grep', g, countMatches)) console.log(line);
+}
+if (opts.match) {
+  for (const line of quotingAdvice('--match', opts.match)) console.log(line);
 }
 
-/** Index subtests by name for comparison. */
-function indexSubtests(result) {
-  const map = new Map();
-  if (!result) return map;
-  for (const s of result.subtests || []) {
-    map.set(s.name, { status: s.status, message: s.message || null });
-  }
-  return map;
+if (unmatched.length) {
+  for (const g of unmatched) console.log(`No changed test path contains "${g}".`);
+  console.log('');
+  console.log('That is NOT evidence the feature is absent — a filename often contains no');
+  console.log('word from the feature name, and a test unchanged in both runs is absent');
+  console.log('from this diff by design. Search subtest names with wpt-grep.js, and');
+  console.log('absolute state with wpt-state.js.');
+  if (!rows.length) process.exit(0);
+  console.log('');
 }
 
-function truncate(s, n) {
-  if (!s) return '';
-  const flat = String(s).replace(/\s+/g, ' ').trim();
-  return flat.length > n ? flat.slice(0, n - 1) + '…' : flat;
+// A literal, case-insensitive substring. Deliberately not a regex: the thing you
+// paste in here is a fragment of an assertion message or a CSS value, and those
+// are full of parens, brackets and percent signs.
+const match = opts.match
+  ? (s) => String(s).toLowerCase().includes(opts.match.toLowerCase())
+  : null;
+
+console.log(`# Subtest detail: ${report.before.spec} -> ${report.after.spec}`);
+const how = [
+  testPaths.length ? `${testPaths.length} named` : null,
+  opts.grep.length ? `--grep ${opts.grep.map((g) => JSON.stringify(g)).join(', ')}` : null,
+].filter(Boolean).join(' + ');
+console.log(`# ${rows.length} test file(s)${how ? ` (${how})` : ''}`);
+if (match) console.log(`# subtests filtered to those matching "${opts.match}"`);
+if (opts.only) console.log(`# categories: ${[...opts.only].join(', ')}`);
+console.log('');
+
+// A real resume command. Named paths go through --grep, since a `?query` path in a
+// line printed to be copied is the whole problem: unquoted the shell globs it, quoted
+// it stops being pre-approved.
+const resume = ['node scripts/wpt-subtests.js']
+  .concat(opts.limit ? ['--limit', String(opts.limit)] : [])
+  .concat(opts.match ? ['--match', shellArg(opts.match)] : [])
+  .concat(opts.only ? ['--only', [...opts.only].join(',')] : [])
+  .concat(opts.grep.flatMap((g) => ['--grep', shellArg(g)]))
+  .concat(testPaths.flatMap((t) => ['--grep', grepFragment(t)]))
+  .join(' ');
+
+for (const line of renderFiles(report, rows, {
+  limit: opts.limit,
+  match,
+  matchLabel: JSON.stringify(opts.match),
+  only: opts.only,
+  part: opts.part,
+  all: opts.all,
+  resume,
+})) {
+  console.log(line);
 }
 
-/**
- * `loud` marks the sections a feature description is actually built from. A
- * partial read of the RIGHT file is harder to notice than not reading it at all:
- * one pass characterised webrtc-stats/supported-stats.https.html from the tail of
- * its 24 newly-passing subtests and missed the 12 RTCTransportStats properties in
- * the middle. Sections that are capped by design (still-failing, passing-in-both)
- * get the quiet note — shouting on all seven only dilutes it.
- */
-function section(title, rows, limit, loud = false) {
-  if (!rows.length) return;
-  console.log(`\n## ${title} (${rows.length})`);
-  const shown = limit > 0 ? rows.slice(0, limit) : rows;
-  for (const r of shown) console.log(r);
-  const hidden = rows.length - shown.length;
-  if (!hidden) return;
-  if (loud) {
-    console.log(`  !! ${hidden} MORE NOT SHOWN — re-run with --limit 0 before describing`);
-    console.log(`  !! this file; the hidden ones may change the story.`);
-  } else {
-    console.log(`  ... and ${hidden} more (--limit 0 for all)`);
-  }
-}
-
-/** Print the full comparison for one test file. */
-function reportOne(testPath, bResult, aResult) {
-  console.log(`\n${'='.repeat(74)}`);
-  console.log(`# ${testPath}`);
-  console.log('='.repeat(74));
-
-  if (!bResult && !aResult) {
-    console.log(`\nNot present in either report. Check the path, including any ?query`);
-    console.log(`variant, and that .any.js tests are named e.g. foo.any.worker.html.`);
-    return;
-  }
-
-  const bStatus = bResult?.status ?? '(absent)';
-  const aStatus = aResult?.status ?? '(absent)';
-  const bMap = indexSubtests(bResult);
-  const aMap = indexSubtests(aResult);
-  const count = (m) => [...m.values()].filter((v) => v.status === 'PASS').length;
-
-  console.log(`\nharness  : ${bStatus} -> ${aStatus}`);
-  console.log(`subtests : ${count(bMap)}/${bMap.size} -> ${count(aMap)}/${aMap.size} passing`);
-  if (bResult?.message || aResult?.message) {
-    if (bResult?.message) console.log(`baseline harness message: ${truncate(bResult.message, 200)}`);
-    if (aResult?.message) console.log(`compare harness message : ${truncate(aResult.message, 200)}`);
-  }
-
-  const names = new Set([...bMap.keys(), ...aMap.keys()]);
-  const fixed = [], broken = [], added = [], removed = [], changed = [], stillFailing = [], unchanged = [];
-
-  for (const name of names) {
-    const b = bMap.get(name);
-    const a = aMap.get(name);
-    if (!b) {
-      added.push(`  ${a.status.padEnd(7)} ${truncate(name, 100)}`
-        + (a.status !== 'PASS' && a.message ? `\n      ${truncate(a.message, 160)}` : ''));
-      continue;
-    }
-    if (!a) {
-      removed.push(`  ${b.status.padEnd(7)} ${truncate(name, 100)}`);
-      continue;
-    }
-    if (b.status === a.status) {
-      if (a.status !== 'PASS') {
-        stillFailing.push(`  ${a.status.padEnd(7)} ${truncate(name, 100)}`
-          + (opts.messages && a.message ? `\n      ${truncate(a.message, 160)}` : ''));
-      } else {
-        unchanged.push(`  PASS    ${truncate(name, 100)}`);
-      }
-      continue;
-    }
-    // Status changed.
-    const line = `  ${b.status} -> ${a.status}  ${truncate(name, 90)}`;
-    if (a.status === 'PASS') {
-      // The message from the *old* failure is the interesting part: it names the cause.
-      fixed.push(line + (b.message ? `\n      was: ${truncate(b.message, 160)}` : ''));
-    } else if (b.status === 'PASS') {
-      broken.push(line + (a.message ? `\n      now: ${truncate(a.message, 160)}` : ''));
-    } else {
-      changed.push(line + (a.message ? `\n      now: ${truncate(a.message, 160)}` : ''));
-    }
-  }
-
-  // The first four are what a feature description gets built from, so a silent
-  // truncation there becomes a confidently incomplete finding.
-  section('Newly passing', fixed, opts.limit, true);
-  section('Newly failing', broken, opts.limit, true);
-  section('Failure changed (still failing)', changed, opts.limit, true);
-  section('Subtests only in compare (added)', added, opts.limit, true);
-  section('Subtests only in baseline (removed)', removed, opts.limit);
-  section('Still failing (unchanged)', stillFailing, opts.messages ? opts.limit : Math.min(opts.limit, 10));
-  if (opts.all) section('Passing in both', unchanged, opts.limit);
-
-  // The whole point: if many fixes share one assertion message, it is one bug.
-  if (fixed.length > 2) {
-    const msgs = [];
-    for (const name of names) {
-      const b = bMap.get(name), a = aMap.get(name);
-      if (b && a && a.status === 'PASS' && b.status !== 'PASS' && b.message) msgs.push(b.message);
-    }
-    const groups = new Map();
-    for (const m of msgs) {
-      // Normalise away test-specific values to spot a shared root cause, then
-      // truncate. Truncating first left a dangling quote that the "…" rule could
-      // not match, so one root cause split into several near-identical groups.
-      const key = truncate(
-        String(m).replace(/"[^"]*"/g, '"…"').replace(/-?\d+(\.\d+)?/g, 'N'),
-        60,
-      );
-      groups.set(key, (groups.get(key) || 0) + 1);
-    }
-    const top = [...groups.entries()].sort((x, y) => y[1] - x[1]);
-    if (top.length && top[0][1] > 1) {
-      console.log(`\n## Shared failure messages among the newly-passing`);
-      console.log(`If one message accounts for most of the fixes, that is ONE bug fixed`);
-      console.log(`unblocking many tests — not many separate fixes. Say so in the notes.`);
-      for (const [msg, n] of top.slice(0, 5)) {
-        console.log(`  ${String(n).padStart(3)}x  ${msg}`);
-      }
-    }
-  }
-}
-
-(async () => {
-  const ids = resolveRunIds();
-  process.stderr.write(`Fetching raw results for ${testPaths.length} test path(s)\n`);
-  process.stderr.write(`  (one pass over each of two large reports; this takes a moment)\n`);
-
-  // Sequential, not Promise.all: a path near the end of a report streams the whole
-  // ~330MB, and two of those at once starve each other's socket — behind a proxy
-  // that surfaces as a mid-transfer "aborted".
-  const before = await fetchSubtests(ids.before, testPaths);
-  const after = await fetchSubtests(ids.after, testPaths);
-
-  const bLabel = ids.label?.before
-    || `${before.run.browser_name} ${before.run.browser_version}`;
-  const aLabel = ids.label?.after
-    || `${after.run.browser_name} ${after.run.browser_version}`;
-
-  console.log(`# Subtest diff: ${testPaths.length} test file(s)`);
-  console.log(`\nbaseline : ${bLabel}, run ${ids.before}`);
-  console.log(`compare  : ${aLabel}, run ${ids.after}`);
-
-  for (const p of testPaths) {
-    reportOne(p, before.results.get(p) || null, after.results.get(p) || null);
-  }
-
-  // Loud tail: with several paths a single "not present" line scrolls away, and a
-  // path silently yielding nothing is how a mistyped ?query variant becomes
-  // "no change here".
-  const missing = testPaths.filter((p) => !before.results.has(p) && !after.results.has(p));
-  if (missing.length) {
-    console.log(`\n!! ${missing.length} of ${testPaths.length} path(s) matched NOTHING in either report:`);
-    for (const p of missing) console.log(`!!   ${p}`);
-  }
-})().catch((err) => {
-  console.error(`error: ${err.message}`);
+// Loud tail: with several paths a single "not found" line scrolls away, and a path
+// silently yielding nothing is how a mistyped ?query variant becomes "no change
+// here".
+if (missing.length) {
+  console.log(`!! ${missing.length} of ${testPaths.length} path(s) are not changed tests in this diff:`);
+  for (const p of missing) console.log(`!!   ${p}`);
+  console.log('!!');
+  console.log('!! Either the path is wrong (check the ?query variant, and that .any.js tests');
+  console.log('!! are named e.g. foo.any.worker.html), or the test did not change — which is');
+  console.log('!! not the same as "the feature is missing". Try:');
+  // Both suggestions use --grep. Echoing the path back bare is how this message
+  // handed over a command that could not run: a `?query` path is glob syntax to the
+  // shell unquoted, and quoted it stops matching a permission rule.
+  // A concrete fragment from the path that failed, not a `<substring>` placeholder.
+  // Angle brackets are shell redirects, so a placeholder in the copy position is one
+  // more command that cannot be run as printed.
+  console.log(`!!   node scripts/wpt-subtests.js --grep ${grepFragment(missing[0])}`);
+  console.log(`!!   node scripts/wpt-state.js --grep ${grepFragment(missing[0])}`);
   process.exit(1);
-});
+}

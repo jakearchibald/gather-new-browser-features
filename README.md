@@ -12,33 +12,62 @@ on every host behind a corporate proxy or a sandbox. `pnpm install` before first
 
 ## Quick start
 
+See what's on wpt.fyi, then collect. Those are the only two steps that use the network:
+
 ```bash
 pnpm install
-mkdir -p tmp
-node scripts/wpt-diff.js --from firefox@beta --to firefox@nightly --subtests --json --top 25 > tmp/diff.txt
+node scripts/wpt-runs.js                                      # what versions exist?
+node scripts/wpt-collect.js --from firefox@beta --to firefox@nightly
 ```
 
-`--subtests` streams both raw reports (~330MB each, ~10s) to record the newly-passing and
-newly-failing subtest *names* per changed file. Those names are what identify a feature; a
-path usually can't. Then read the full inventory, drill into whatever moved, and read the
-tests before writing about them:
+It streams both raw reports (~330MB each), records **every** subtest that changed state
+with its assertion message, stores both full summaries, and fetches the source of every
+changed test at the revision its run was tested at. A minute or two, once. It writes
+`tmp/<from>-vs-<to>/`:
+
+```text
+diff.json        every changed test file, with complete subtest evidence
+report.txt       the ranked view, directory clusters, shared vocabulary
+checklist.md     the coverage worksheet — resolve it with wpt-resolve.js
+boxes.json       the box list as generated, so --verify can spot a lost box
+state.json.gz    both full summaries, all ~120k tests
+sources/         each changed test's source, at the right revision
+```
+
+**Everything after that is a local read.** Only `wpt-runs.js` and `wpt-collect.js` touch
+the network; `selftest.js` runs every analysis script with the proxy pointed at a closed
+port to keep it that way.
 
 ```bash
-D=tmp/firefox-beta-vs-firefox-experimental.diff.json   # --json prints the path it chose
-node scripts/wpt-inventory.js "$D" --checklist tmp/checklist.md   # worksheet — start here
-node scripts/wpt-inventory.js "$D"                      # every changed file + its subtest names
-node scripts/wpt-inventory.js --verify tmp/checklist.md # non-zero while boxes are unticked
-node scripts/wpt-area.js "$D" /fetch                    # what changed in an area
-node scripts/wpt-subtests.js "$D" /fetch/http-cache/no-vary-search.tentative.any.html --limit 0
-node scripts/wpt-fetch-tests.js --from-diff "$D" --area /fetch --top 3
-node scripts/wpt-state.js "$D" --grep sound-state       # is there even a test? (diffs can't say)
+node scripts/wpt-inventory.js --dirs                 # the map
+node scripts/wpt-inventory.js                        # every changed file + evidence
+node scripts/wpt-inventory.js --include /css/css-ui  # one area in full
+node scripts/wpt-inventory.js --verify               # gate: fails while boxes are open
+node scripts/wpt-subtests.js  /fetch/http-cache/no-vary-search.tentative.any.html
+node scripts/wpt-fetch-tests.js --area /fetch --top 3
+node scripts/wpt-grep.js      pseudoElement
+node scripts/wpt-state.js     --grep sound-state     # is there even a test?
 ```
+
+**Every view is paged.** A tool result holds roughly 30KB, and several of these views
+outgrow that — one file's subtest detail reached 66KB, a broad `wpt-grep.js` pattern 3MB,
+`wpt-state.js --grep / --limit 0` 16MB. Rather than being truncated with no marker, output
+breaks between whole blocks (a directory, a subtest, a section, a file) and says which page
+it is, what has not been read, and the command to continue. `--all` overrides it for
+deliberate redirection to a file. `selftest.js` sweeps every command at its most verbose
+arguments and fails if any exceeds the limit without announcing itself as one page.
+
+No path argument: each defaults to the only collected comparison in `tmp/` and prints
+which one it used, refusing to guess when several exist. That is deliberate rather than
+merely convenient — shell variables do not survive between tool calls, so an `export
+D=… && node …` convention has to be repeated on every command, and a compound command
+matches no permission-allowlist prefix, so it prompts every single time.
 
 Read the inventory in full rather than skimming the biggest numbers. **Subtest count is not
 a measure of importance** — a one-file `+1` was a shipped feature (`-webkit-` pseudo-elements
 now parse) that got missed twice by ranked views, and a `+400` can be one missing property
 fixed. The inventory selects nothing and sorts alphabetically for exactly this reason, and
-it takes no `--exclude` unless you ask: an earlier default of `/third_party` hid the whole
+it has no `--exclude` at all: an earlier default of `/third_party` hid the whole
 `Intl.Locale` info proposal. JavaScript and `Intl` features live in `third_party/test262`,
 never under a web-platform directory.
 
@@ -46,58 +75,74 @@ never under a web-platform directory.
 
 | Script | Purpose |
 | --- | --- |
-| [wpt-diff.js](scripts/wpt-diff.js) | Diff two runs. Prints a report; `--json` writes structured data for the other scripts, and `--subtests` adds per-file subtest names. |
-| [wpt-inventory.js](scripts/wpt-inventory.js) | Every changed file with its subtest names, grouped by directory, ranked by nothing. `--checklist` writes a coverage worksheet; `--verify` fails while any box is unticked. |
-| [wpt-area.js](scripts/wpt-area.js) | Drill into one path prefix of a diff, or list all regressions/improvements. |
-| [wpt-subtests.js](scripts/wpt-subtests.js) | Diff the individual subtests of one or more test files, with the assertion message for each failure. Finds the *cause*, not just the count. Pass every path to one invocation — each call streams two ~330MB reports and scans them in a single pass. |
-| [wpt-fetch-tests.js](scripts/wpt-fetch-tests.js) | Fetch WPT test sources so code examples are accurate rather than guessed. Pass `--from-diff` to read them at the revision the runs were tested at, not `master`. |
-| [wpt-grep.js](scripts/wpt-grep.js) | Search a diff for a keyword in subtest names and messages (free), paths (free), then test source (`--sources`). A filename often contains no word from the feature's name. |
-| [wpt-state.js](scripts/wpt-state.js) | Absolute pass/fail of a test in both runs, including tests the diff omits. "Not in the diff" never means "not shipped". |
-| [selftest.js](scripts/selftest.js) | Asserts the tooling still surfaces the features it has historically missed. Run it after changing any of the above. |
+| [wpt-runs.js](scripts/wpt-runs.js) | What is on wpt.fyi: versions and dates per channel, and the collect command for the two commonest comparisons. Run this before choosing specs. |
+| [wpt-collect.js](scripts/wpt-collect.js) | Diffs two runs and writes the artifact directory everything else reads. With `wpt-runs.js`, the only script that uses the network. |
+| [wpt-inventory.js](scripts/wpt-inventory.js) | Every changed file with its subtest names, grouped by directory, ranked by nothing. `--verify` fails while any checklist box is unticked. |
+| [wpt-report.js](scripts/wpt-report.js) | The ranked view: per-kind sections, area rollups, directory clusters, shared vocabulary. `--section` picks one; `--top 0` shows a section in full. |
+| [wpt-subtests.js](scripts/wpt-subtests.js) | Every subtest of a file, with the assertion message behind each change, plus a rollup grouping them by message. Finds the *cause*, not just the count. |
+| [wpt-fetch-tests.js](scripts/wpt-fetch-tests.js) | Print cached test source so code examples are accurate rather than guessed — at the revision the runs were tested at, not `master`. |
+| [wpt-grep.js](scripts/wpt-grep.js) | Search subtest names and messages, paths, then test source. A filename often contains no word from the feature's name. |
+| [wpt-state.js](scripts/wpt-state.js) | Absolute pass/fail of any test in both runs, including the ~120k the diff omits. "Not in the diff" never means "not shipped". |
+| [wpt-resolve.js](scripts/wpt-resolve.js) | Apply a `{"box path": "verdict"}` file to the checklist. Exact keys only, no patterns, no fallback — a key matching no box writes nothing. Ticking boxes by hand cost 22% of one run's entire output. |
+| [selftest.js](scripts/selftest.js) | Asserts the tooling still surfaces the features it has historically missed, and that nothing but the collector touches the network. Run it after changing any of the above. |
 
-Each takes `--help`.
+Each takes `--help`. Shared logic lives in [scripts/lib/](scripts/lib/).
 
-Specs for `wpt-diff.js` are `product[@channel][@version]`; channels are `stable`, `beta`,
-`experimental` (aliases `nightly`, `release`, `tp`).
+## Collecting
+
+Specs are `product[@channel][@version]`; channels are `stable`, `beta`, `experimental`
+(aliases `nightly`, `release`, `tp`).
 
 ```bash
-node scripts/wpt-diff.js --from chrome@stable --to firefox@nightly --json
-node scripts/wpt-diff.js --from firefox@beta --to firefox@nightly --aligned
+node scripts/wpt-collect.js --from chrome@stable --to firefox@nightly
+node scripts/wpt-collect.js --from firefox@beta --to firefox@nightly --aligned
+node scripts/wpt-collect.js --from firefox@stable@152 --to firefox@stable@153
 ```
 
 `--aligned` pins both runs to the same WPT revision so test-suite churn drops out of the
 diff. Release channels are often tested at different revisions, so it can fail to find a
 match — it says so rather than guessing.
 
-Also supported: a version pin, for release notes between two shipped versions. Once 153 is
-stable, `firefox@stable` no longer resolves to 152, so the baseline has to be named.
-
-```bash
-node scripts/wpt-diff.js --from firefox@stable@152 --to firefox@stable@153 --json
-```
-
-Keep the channel alongside the version — nightly runs outnumber stable ones by ~50:1, so an
+A version pin is for release notes between two shipped versions: once 153 is stable,
+`firefox@stable` no longer resolves to 152, so the baseline has to be named. Keep the
+channel alongside the version — nightly runs outnumber stable ones by ~50:1, so an
 unlabelled version search never reaches back far enough. Version pins can't be combined
 with `--aligned`: two shipped versions are never tested at the same WPT revision.
+
+Other options: `--out <dir>` to collect elsewhere, `--no-sources` to skip the source
+prefetch, `--force` to overwrite an existing artifact, `--top`/`--cluster-min`/
+`--cluster-ratio` to tune `report.txt`. A collection refuses to overwrite an artifact whose
+`checklist.md` has ticks in it, since that is the one thing here that can't be regenerated.
 
 Test files are classified, which is what makes the analysis possible. The most useful
 category is `newly-running`: a test that previously errored or crashed and now executes,
 which usually means an API went from absent to present. Reference tests get their own
 sections, because they carry no subtests and so are invisible to a subtest delta.
 
-The report ends with a **Directory clusters** section, which ranks directories by how many
-files moved and how one-sided the movement was, rather than by subtest delta. Every other
-section ranks by magnitude, so a feature that lands as many tiny per-file gains is invisible
-in all of them — this section is the one that catches it, and it prints in full rather than
-obeying `--top`. Added and removed tests don't count as movement (that's test-suite churn,
-not the browser), and nothing is excluded by path — `third_party/test262` clusters are where
-JavaScript and `Intl` features show up. Loosen it with `--cluster-min` and `--cluster-ratio`.
+`report.txt` ends with two sections that exist because ranking hides things:
 
-With `--subtests` there is also a **One feature, several directories** section, which does
-the same job on subtest vocabulary instead of paths: a token appearing in newly-passing
-subtest names under two or more directories is probably one change in several places.
-`field-sizing` turned up across `/css/css-cascade`, `/css/css-ui`, `/html/rendering/widgets`
-and `/web-animations`.
+- **Directory clusters** ranks directories by how many files moved and how one-sided the
+  movement was, rather than by subtest delta. Every other section ranks by magnitude, so a
+  feature that lands as many tiny per-file gains is invisible in all of them. Added and
+  removed tests don't count as movement (that's test-suite churn, not the browser), and
+  nothing is excluded by path — `third_party/test262` clusters are where JavaScript and
+  `Intl` features show up.
+- **One feature, several directories** does the same job on subtest vocabulary instead of
+  paths: a token appearing in newly-passing subtest names under two or more directories is
+  probably one change in several places. `field-sizing` turned up across `/css/css-cascade`,
+  `/css/css-ui`, `/html/rendering/widgets` and `/web-animations`.
+
+## Why complete subtest evidence
+
+The collector stores every subtest that changed state, with its message — not a capped
+sample. That is what makes the drill-in step a local read: it used to re-stream two ~330MB
+reports per invocation, so the step that actually names features was the expensive one, and
+it got skipped or sampled with `tail`.
+
+The cost is small, because roughly 90% of subtests in changed files pass on both sides and
+only need counting. A two-release diff (2,587 changed files) stores ~8,900 subtest records
+in a 4.9MB `diff.json`. The cap it replaced was 25 names per file, which truncated 29 files
+in that same diff — the worst keeping 25 of 168 newly-passing names.
 
 ## Interpreting the output
 
@@ -119,14 +164,14 @@ that report no subtests, and partial runs published to wpt.fyi.
 
 ```text
 scripts/               the tools
-scripts/lib/net.js     proxy-aware fetch; Node's built-in fetch ignores HTTP_PROXY
-tmp/                   generated diffs (gitignored — ~2.5MB with --subtests, changes daily)
+scripts/lib/           shared logic: transport, report streaming, rendering, analysis
+tmp/<a>-vs-<b>/        one collected comparison (gitignored)
 release-notes/         finished notes (gitignored — regenerable, and stale as new runs land)
 .claude/skills/        the repeatable workflow
 ```
 
-`selftest.js` needs two diff artifacts to run against; see its `--help` for the two commands
-that generate them.
+`selftest.js` needs two artifacts to run against; see its `--help` for the two commands
+that collect them.
 
 ## Running it without permission prompts
 

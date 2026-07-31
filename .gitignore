@@ -1,6 +1,6 @@
-# Intermediate artifacts live in tmp/ by default. A diff.json is ~600KB and its
-# contents change daily as new runs land on wpt.fyi, so it's noise in a diff —
-# regenerate with scripts/wpt-diff.js instead of committing one.
+# One collected comparison per subdirectory: a few MB of diff.json plus cached
+# test sources, and its contents change daily as new runs land on wpt.fyi.
+# Re-collect with scripts/wpt-collect.js instead of committing one.
 tmp/
 
 # Finished release notes. Regenerable from a diff and stale as soon as new runs

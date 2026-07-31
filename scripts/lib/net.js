@@ -87,4 +87,4 @@ function netFetch(url) {
   return undiciFetch(url, { dispatcher: dispatcherFor(new URL(url)) });
 }
 
-module.exports = { netFetch, proxyUrlFor };
+module.exports = { netFetch };
