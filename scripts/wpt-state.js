@@ -29,7 +29,13 @@
  *                 feature's name, so search broadly before concluding anything.
  *                 Grepping paths is a weak search — confirm against the source
  *                 with wpt-grep.js and wpt-fetch-tests.js.
- *   --limit <n>   max rows for --grep (default 40; 0 = all)
+ *   --only <c,..> narrow a --grep result to: failing-after, passing-after, moved, same.
+ *                 "Which of these still fail?" is the question asked when writing a
+ *                 feature up, and it had no answer: 143 text-box-trim tests, 11 still
+ *                 failing, and reading all 143 to find them meant reading past a cap
+ *                 that hid 10 of the 11.
+ *   --limit <n>   ignored, accepted so old command lines still run. Output is bounded
+ *                 by pagination, which can say what it has not shown yet.
  *
  * Things with no WPT coverage at all, and so invisible here regardless: rendering
  * fixes with no reftest, "stopped working after several navigations"-style bugs,
@@ -41,7 +47,7 @@
 const fs = require('fs');
 const { usage, num, unknownOption } = require('./lib/cli.js');
 const artifact = require('./lib/artifact.js');
-const { fmtSide, shellArg } = require('./lib/wpt.js');
+const { fmtSide, shellArg, PASS_LIKE } = require('./lib/wpt.js');
 const { grepFragment } = require('./lib/render.js');
 const { readState } = require('./lib/summary.js');
 const page = require('./lib/page.js');
@@ -51,12 +57,32 @@ const fail = (msg) => usage(__filename, msg);
 const argv = process.argv.slice(2);
 if (!argv.length || argv.includes('-h') || argv.includes('--help')) usage(__filename);
 
-const opts = { dir: null, path: null, grep: null, limit: 40, part: 1, all: false };
+const STATE_CATEGORIES = ['failing-after', 'passing-after', 'moved', 'same'];
+
+const opts = {
+  dir: null, path: null, grep: null, only: null, part: 1, all: false,
+};
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   switch (a) {
     case '--grep': opts.grep = argv[++i]; break;
-    case '--limit': opts.limit = num(fail, a, argv[++i]); break;
+    // Accepted and ignored. It used to cap the list at 40 before pagination saw it,
+    // which made "!! END — all 40 tests shown." a lie about a 143-match search. Kept
+    // as a no-op rather than removed so an old command line still runs, and says so
+    // rather than silently behaving differently than it used to.
+    case '--limit':
+      num(fail, a, argv[++i]);
+      console.log('note: --limit is ignored. Output is bounded by pagination now — see --part');
+      console.log('      and --all — because a cap could not say what it had dropped.');
+      break;
+    case '--only': {
+      const raw = String(argv[++i] || '').split(',').map((s) => s.trim()).filter(Boolean);
+      if (!raw.length) fail(`--only needs at least one of: ${STATE_CATEGORIES.join(', ')}`);
+      const bad = raw.filter((c) => !STATE_CATEGORIES.includes(c));
+      if (bad.length) fail(`unknown --only category "${bad[0]}" (choose from: ${STATE_CATEGORIES.join(', ')})`);
+      opts.only = new Set(raw);
+      break;
+    }
     case '--part': opts.part = num(fail, a, argv[++i]); break;
     case '--all': opts.all = true; break;
     default:
@@ -102,28 +128,63 @@ if (opts.grep) {
     console.log('names and source with wpt-grep.js, and finally check Bugzilla.');
     process.exit(0);
   }
-  console.log('');
-  const shown = opts.limit > 0 ? hits.slice(0, opts.limit) : hits;
-  // Paged: `--grep / --limit 0` matches all ~120k tests and produced 16MB before
-  // this, five hundred times what a tool result holds. The harness truncates that
-  // with no marker, so "no more matches" and "cut off here" looked identical.
-  const blocks = shown.map((t) => {
+  const passing = (s) => s && PASS_LIKE.has(s.status) && (s.total === 0 || s.pass === s.total);
+  const rows = hits.map((t) => {
     const b = before.get(t);
     const a = after.get(t);
-    const moved = b && a && (b.pass !== a.pass || b.total !== a.total || b.status !== a.status);
     return {
-      lines: [`  ${fmtSide(b).padEnd(18)} -> ${fmtSide(a).padEnd(18)} ${moved ? '(moved)  ' : '         '}${t}`],
+      test: t,
+      before: b,
+      after: a,
+      moved: b && a && (b.pass !== a.pass || b.total !== a.total || b.status !== a.status),
+      passingAfter: passing(a),
     };
   });
-  const resume = `node scripts/wpt-state.js --grep ${shellArg(opts.grep)}` +
-    (opts.limit !== 40 ? ` --limit ${opts.limit}` : '');
+
+  const selected = opts.only
+    ? rows.filter((r) => (opts.only.has('failing-after') && !r.passingAfter)
+      || (opts.only.has('passing-after') && r.passingAfter)
+      || (opts.only.has('moved') && r.moved)
+      || (opts.only.has('same') && !r.moved))
+    : rows;
+
+  if (opts.only) {
+    console.log(`filtered to ${selected.length} matching: ${[...opts.only].join(', ')}`);
+  }
+  console.log('');
+
+  // Every matching row, bounded by pagination and nothing else.
+  //
+  // There used to be a `--limit 40` default that sliced the list HERE, before the
+  // paginator saw it — so the paginator reported "!! END — all 40 tests shown." while
+  // 103 of 143 matches had already been dropped upstream, with the notice about them
+  // printed after the END marker and not even marked `!!`. That is a completeness
+  // claim sitting directly above an admission of incompleteness, and it was not
+  // hypothetical: `--grep text-box-trim` had 11 tests still failing, 10 of them past
+  // the cap, so the visible answer to "what is left?" was 1 of 11 — and the six
+  // text-box-trim-line-clamp-* failures, a coherent feature gap worth writing up,
+  // were entirely invisible.
+  //
+  // Pagination already solves the size problem honestly: it says which part this is,
+  // what has not been read, and how to continue. A silent cap cannot. So the cap is
+  // gone rather than reworded, and --limit is accepted only as a deprecated no-op
+  // (below) so an old command line does not fail.
+  const blocks = selected.map((r) => ({
+    lines: [`  ${fmtSide(r.before).padEnd(18)} -> ${fmtSide(r.after).padEnd(18)} `
+      + `${r.moved ? '(moved)  ' : '         '}${r.test}`],
+  }));
+  const resume = `node scripts/wpt-state.js --grep ${shellArg(opts.grep)}`
+    + (opts.only ? ` --only ${[...opts.only].join(',')}` : '');
   for (const line of page.render(blocks, {
     part: opts.part, all: opts.all, unit: 'tests', resume,
   }).lines) {
     console.log(line);
   }
-  if (shown.length < hits.length) {
-    console.log(`\n  ... and ${hits.length - shown.length} beyond --limit ${opts.limit} (--limit 0 for all)`);
+  if (!opts.only && rows.length > 20) {
+    const failing = rows.filter((r) => !r.passingAfter).length;
+    console.log('');
+    console.log(`${failing} of ${rows.length} are still failing in ${report.after.spec}. Just those:`);
+    console.log(`  node scripts/wpt-state.js --grep ${shellArg(opts.grep)} --only failing-after`);
   }
   process.exit(0);
 }

@@ -1000,6 +1000,46 @@ function generalChecks(dir) {
   // verdicts as a data file are ~7k. Both refusals below are what stop that becoming
   // the earlier regex script, which stamped every unmatched box "written up — see
   // notes" and would have passed the gate on all 416.
+  // A completeness claim must be true. `wpt-state.js --grep` used to slice its match
+  // list at 40 BEFORE the paginator saw it, so the paginator said "!! END — all 40
+  // tests shown." about a 143-match search, with the notice about the other 103 printed
+  // after the END marker and not even marked `!!`.
+  //
+  // That is not a cosmetic ordering problem. `--grep text-box-trim` had 11 tests still
+  // failing and 10 of them were past the cap, so the visible answer to "what is left?"
+  // was 1 of 11 — and six text-box-trim-line-clamp-* failures, a coherent feature gap,
+  // were invisible. Pagination can say what it has not shown; a cap cannot, so there
+  // are no caps.
+  check('"all N shown" is never printed over dropped rows', () => {
+    const probes = [
+      ['wpt-state.js', ['--grep', 'text-box-trim']],
+      ['wpt-state.js', ['--grep', 'css-inline']],
+      ['wpt-subtests.js', ['--grep', '/css/css-color']],
+      ['wpt-grep.js', ['color']],
+    ];
+    for (const [script, args] of probes) {
+      const out = run(script, [dir, ...args]);
+      if (/beyond --limit/.test(out)) return `${script} still drops rows to a cap`;
+      const claim = out.match(/^!! END — all (\d+) (\S+) shown/m);
+      if (!claim) continue;
+      // The claimed count must match the rows actually emitted.
+      const rows = out.split('\n').filter((l) => /^ {2}\S+ +\d+\/\d+ +->/.test(l)).length;
+      if (rows && Number(claim[1]) !== rows) {
+        return `${script} claims all ${claim[1]} ${claim[2]} shown but printed ${rows} rows`;
+      }
+    }
+    return null;
+  });
+
+  check('wpt-state.js --only failing-after returns only failures', () => {
+    const out = run('wpt-state.js', [dir, '--grep', 'css-inline', '--only', 'failing-after']);
+    const rows = out.split('\n').filter((l) => /^ {2}\S+ +\d+\/\d+ +->/.test(l));
+    if (!rows.length) return null;
+    // The right-hand side of every row must be a non-passing state.
+    const wrong = rows.filter((l) => / -> {2}(PASS|OK) +(\d+)\/\2\b/.test(l));
+    return wrong.length ? `${wrong.length} passing row(s) survived the filter, e.g. ${wrong[0].trim()}` : null;
+  });
+
   // The general form of the test262 bug. Three separate generated-wrapper suffixes were
   // missing from toSourcePath — .test262.html, .extension.html, and then
   // .test262-module.html, which only turned up by re-collecting after fixing the first

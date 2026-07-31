@@ -51,11 +51,19 @@ node scripts/wpt-state.js     --grep sound-state     # is there even a test?
 
 **Every view is paged.** A tool result holds roughly 30KB, and several of these views
 outgrow that — one file's subtest detail reached 66KB, a broad `wpt-grep.js` pattern 3MB,
-`wpt-state.js --grep / --limit 0` 16MB. Rather than being truncated with no marker, output
+`wpt-state.js --grep /` 16MB. Rather than being truncated with no marker, output
 breaks between whole blocks (a directory, a subtest, a section, a file) and says which page
 it is, what has not been read, and the command to continue. `--all` overrides it for
 deliberate redirection to a file. `selftest.js` sweeps every command at its most verbose
 arguments and fails if any exceeds the limit without announcing itself as one page.
+
+**And nothing caps.** Pagination can say what it has not shown yet; a row cap cannot, so
+there are none. `wpt-state.js` used to default to `--limit 40`, sliced before the paginator
+saw the list — which made it print `!! END — all 40 tests shown.` about a 143-match search,
+with the notice about the other 103 *after* the END marker. `--grep text-box-trim` had 11
+tests still failing and 10 were past the cap, so the answer to "what is left?" read as 1
+of 11. `--limit` is now an ignored no-op, and a selftest check fails if any view ever again
+claims completeness over dropped rows.
 
 No path argument: each defaults to the only collected comparison in `tmp/` and prints
 which one it used, refusing to guess when several exist. That is deliberate rather than
@@ -82,7 +90,7 @@ never under a web-platform directory.
 | [wpt-subtests.js](scripts/wpt-subtests.js) | Every subtest of a file, with the assertion message behind each change, plus a rollup grouping them by message. Finds the *cause*, not just the count. |
 | [wpt-fetch-tests.js](scripts/wpt-fetch-tests.js) | Print cached test source so code examples are accurate rather than guessed — at the revision the runs were tested at, not `master`. |
 | [wpt-grep.js](scripts/wpt-grep.js) | Search subtest names and messages, paths, then test source. A filename often contains no word from the feature's name. |
-| [wpt-state.js](scripts/wpt-state.js) | Absolute pass/fail of any test in both runs, including the ~120k the diff omits. "Not in the diff" never means "not shipped". |
+| [wpt-state.js](scripts/wpt-state.js) | Absolute pass/fail of any test in both runs, including the ~120k the diff omits. "Not in the diff" never means "not shipped". `--only failing-after` answers "what's still broken in this feature?". |
 | [wpt-resolve.js](scripts/wpt-resolve.js) | Apply a `{"box path": "verdict"}` file to the checklist. Exact keys only, no patterns, no fallback — a key matching no box writes nothing. Ticking boxes by hand cost 22% of one run's entire output. |
 | [selftest.js](scripts/selftest.js) | Asserts the tooling still surfaces the features it has historically missed, and that nothing but the collector touches the network. Run it after changing any of the above. |
 

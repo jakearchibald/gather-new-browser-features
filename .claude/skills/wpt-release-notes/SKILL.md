@@ -682,7 +682,14 @@ runs — and answers all three of the non-confirmed cases:
 ```bash
 node scripts/wpt-state.js --grep sound-state                        # does a test exist?
 node scripts/wpt-state.js /css/selectors/media/sound-state.html     # its state in both runs
+node scripts/wpt-state.js --grep text-box-trim --only failing-after # what's STILL broken?
 ```
+
+**Use `--only failing-after` before writing up any feature as shipped.** A feature that
+mostly works usually has a shaped gap worth a sentence, and the gap is what a developer
+needs. `text-box-trim` passes 132 of 143 tests — and six of the eleven failures are
+`text-box-trim-line-clamp-*`, i.e. it does not work with `line-clamp` yet. That is a caveat,
+not a footnote, and it is invisible unless you ask for it.
 
 Things with no WPT coverage at all, and so invisible here regardless: rendering fixes with
 no reftest, "stopped working after several navigations"-style bugs, event *ordering* changes
