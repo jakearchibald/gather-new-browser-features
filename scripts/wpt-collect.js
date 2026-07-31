@@ -568,7 +568,7 @@ async function main() {
 
   writeAtomic(path.join(opts.out, 'diff.json'), JSON.stringify(report, null, 2));
   writeAtomic(path.join(opts.out, 'report.txt'), `${renderReport(report, { top: opts.top }).join('\n')}\n`);
-  const checklistText = `${renderChecklist(report, changed).join('\n')}\n`;
+  const checklistText = `${renderChecklist(report, changed, { dir: artifact.rel(opts.out) }).join('\n')}\n`;
   writeAtomic(path.join(opts.out, 'checklist.md'), checklistText);
   // The box list as generated. checklist.md is edited in place by whoever resolves
   // it, and a whole-file rewrite can drop a line without changing the count — so the
@@ -598,7 +598,10 @@ async function main() {
   }
 
   // ---- what to do next ----
-  const rel = path.relative(process.cwd(), opts.out) || opts.out;
+  // Root-relative, not cwd-relative: the Bash tool's working directory persists between
+  // calls, so one stray `cd` renders this as "../../../Users/..." — correct, unusable,
+  // and worse, wrong if copied from a different directory later.
+  const rel = artifact.rel(opts.out);
   console.log(`Collected ${changed.length} changed test files into ${rel}/`);
   console.log('');
   console.log(`  diff.json      ${(fs.statSync(path.join(opts.out, 'diff.json')).size / 1e6).toFixed(1)}MB, complete subtest evidence`);
@@ -634,11 +637,15 @@ async function main() {
   // the only collected comparison, which keeps each command a bare script
   // invocation — the form the permission allowlist can actually match. A compound
   // `export D=... && node ...` matches no rule and prompts every time.
+  // Naming the artifact even though a lone comparison would be found by default: the
+  // moment tmp/ holds a second one, every command that omitted it fails with "name the
+  // one you mean", and these lines are printed once and copied later.
   console.log('Everything from here is local. Next:');
   console.log('');
-  console.log('  node scripts/wpt-inventory.js --dirs      # the map');
-  console.log('  node scripts/wpt-inventory.js             # every file + evidence');
-  console.log('  node scripts/wpt-inventory.js --verify    # gate before writing');
+  console.log(`  node scripts/wpt-inventory.js ${rel} --dirs      # the map`);
+  console.log(`  node scripts/wpt-inventory.js ${rel}             # every file + evidence`);
+  console.log(`  node scripts/wpt-resolve.js ${rel} --list        # the box paths to verdict`);
+  console.log(`  node scripts/wpt-inventory.js ${rel} --verify    # gate before writing`);
   console.log('');
   // Stated here because this is the last thing read before the analysis commands
   // start, and because a pipe is both lossy and the thing that turns each of those

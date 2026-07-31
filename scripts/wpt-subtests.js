@@ -137,7 +137,7 @@ if (!testPaths.length && !opts.grep.length) {
   fail('need at least one test path, or --grep <substring>');
 }
 
-const { report } = artifact.load(opts.dir, fail);
+const { paths: art, report } = artifact.load(opts.dir, fail);
 const changed = report.tests.filter((r) => r.kind !== 'unchanged');
 const byPath = new Map(changed.map((r) => [r.test, r]));
 
@@ -202,7 +202,7 @@ console.log('');
 // A real resume command. Named paths go through --grep, since a `?query` path in a
 // line printed to be copied is the whole problem: unquoted the shell globs it, quoted
 // it stops being pre-approved.
-const resume = ['node scripts/wpt-subtests.js']
+const resume = [artifact.cmd('wpt-subtests.js', art)]
   .concat(opts.limit ? ['--limit', String(opts.limit)] : [])
   .concat(opts.match ? ['--match', shellArg(opts.match)] : [])
   .concat(opts.only ? ['--only', [...opts.only].join(',')] : [])
@@ -238,7 +238,7 @@ if (missing.length) {
   // A concrete fragment from the path that failed, not a `<substring>` placeholder.
   // Angle brackets are shell redirects, so a placeholder in the copy position is one
   // more command that cannot be run as printed.
-  console.log(`!!   node scripts/wpt-subtests.js --grep ${grepFragment(missing[0])}`);
-  console.log(`!!   node scripts/wpt-state.js --grep ${grepFragment(missing[0])}`);
+  console.log(`!!   ${artifact.cmd('wpt-subtests.js', art)} --grep ${grepFragment(missing[0])}`);
+  console.log(`!!   ${artifact.cmd('wpt-state.js', art)} --grep ${grepFragment(missing[0])}`);
   process.exit(1);
 }

@@ -243,7 +243,7 @@ for (const t of targets) {
 // A resume command is printed to be pasted, so every path in it goes through --grep.
 // Concatenating the paths bare produced a line that only worked for paths with no
 // `?query` in them, and silently produced a broken command for the ones that had one.
-const resume = ['node scripts/wpt-fetch-tests.js']
+const resume = [artifact.cmd('wpt-fetch-tests.js', art)]
   .concat(opts.area ? ['--area', opts.area] : [])
   .concat(opts.top !== 5 ? ['--top', String(opts.top)] : [])
   .concat(opts.head !== 60 ? ['--head', String(opts.head)] : [])

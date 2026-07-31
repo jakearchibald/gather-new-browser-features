@@ -219,17 +219,31 @@ if (opts.verify) {
     'Paths added or altered by hand. Usually a path edited while ticking it.',
   );
 
+  // Leads with the verdicts-file route, because this message is printed every time the
+  // gate fails — which is most of a pass — and it used to describe hand-editing. That is
+  // the method measured at 106 Edit calls and 22% of one run's entire output, so the
+  // most-read line in the toolkit was recommending its most expensive path, and never
+  // mentioned the command that exists to replace it.
   console.log('');
-  console.log('Resolve every line before writing notes. Replace the box with [x]/(x) and');
-  console.log('append " — <verdict>", one of:');
+  console.log('Resolve every line before writing notes. Do it as data, not as edits:');
+  console.log('');
+  console.log(`  1. ${artifact.cmd('wpt-resolve.js', paths)} --list`);
+  console.log('     every box path with no verdict yet — use these EXACTLY as keys');
+  console.log('  2. write {"<box path>": "<verdict>", ...} with the Write tool');
+  console.log(`  3. ${artifact.cmd('wpt-resolve.js', paths)} <that file>`);
+  console.log('');
+  console.log('Each verdict is one of:');
   console.log('  written up: <the feature, as it appears in the notes>');
   console.log('  explained: same feature as <name the other entry>   <- a target is required');
   console.log('  not a feature: <infrastructure, flake or churn, and why>');
+  console.log('');
+  console.log('Editing checklist.md by hand works too, and costs several times the output —');
+  console.log('an edit has to restate its surrounding context, a verdict does not.');
   process.exit(1);
 }
 
 // ---- the listing ----
-const { report } = artifact.load(opts.dir, fail);
+const { paths: art, report } = artifact.load(opts.dir, fail);
 
 let tests = report.tests.filter((r) => r.kind !== 'unchanged');
 if (opts.include.length) {
@@ -250,7 +264,7 @@ const filters = [
 
 // Rebuilt from the parsed options rather than process.argv, so the resume command is
 // normalised and carries no metacharacters beyond what a value genuinely needs.
-const resume = ['node scripts/wpt-inventory.js']
+const resume = [artifact.cmd('wpt-inventory.js', art)]
   .concat(opts.dirs ? ['--dirs'] : [])
   .concat(opts.improvements ? ['--improvements'] : [])
   .concat(opts.regressions ? ['--regressions'] : [])

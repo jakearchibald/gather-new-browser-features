@@ -137,14 +137,17 @@ if (opts.list) {
   }
   if (!blocks.length) {
     console.log('Every box already has a verdict. Check the gate:');
-    console.log('  node scripts/wpt-inventory.js --verify');
+    console.log(`  ${artifact.cmd('wpt-inventory.js', paths)} --verify`);
     process.exit(0);
   }
   console.log(`# ${blocks.length} box(es) with no verdict yet, in ${artifact.rel(paths.checklist)}`);
   console.log('# Use these EXACTLY as keys in the verdicts file. Trailing "#" is a comment.');
   console.log('');
   for (const line of page.render(blocks, {
-    part: opts.part, all: opts.all, unit: 'boxes', resume: 'node scripts/wpt-resolve.js --list',
+    part: opts.part,
+    all: opts.all,
+    unit: 'boxes',
+    resume: `${artifact.cmd('wpt-resolve.js', paths)} --list`,
   }).lines) {
     console.log(line);
   }
@@ -194,7 +197,7 @@ if (unmatched.length) {
   console.error('copied from checklist.md — not a prefix, a pattern or a guess. Check for a');
   console.error('trailing slash, a missing leading "/", or a directory that has no box because');
   console.error('it was pre-resolved as churn. List the real box paths with:');
-  console.error('  node scripts/wpt-inventory.js --dirs');
+  console.error(`  ${artifact.cmd('wpt-resolve.js', paths)} --list`);
   process.exit(1);
 }
 
@@ -265,7 +268,7 @@ if (toApply.length) {
   console.log(`Previous checklist saved as ${artifact.rel(paths.checklist)}.bak`);
 }
 console.log('');
-console.log('Check the gate:  node scripts/wpt-inventory.js --verify');
+console.log(`Check the gate:  ${artifact.cmd('wpt-inventory.js', paths)} --verify`);
 
 // Sanity: the box set must not have changed. This script only ever rewrites a box's
 // own line in place, so a difference here means a bug in this script rather than in

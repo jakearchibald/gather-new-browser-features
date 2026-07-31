@@ -226,7 +226,7 @@ if (!opts.sources) {
 // ---------------------------------------------------------------------------
 // One page of the combined result.
 // ---------------------------------------------------------------------------
-const resume = ['node scripts/wpt-grep.js', shellArg(opts.pattern)]
+const resume = [artifact.cmd('wpt-grep.js', paths), shellArg(opts.pattern)]
   .concat(opts.include.flatMap((i) => ['--include', shellArg(i)]))
   .concat(opts.sources ? [] : ['--no-sources'])
   .join(' ');

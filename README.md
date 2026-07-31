@@ -29,7 +29,7 @@ changed test at the revision its run was tested at. A minute or two, once. It wr
 diff.json        every changed test file, with complete subtest evidence
 report.txt       the ranked view, directory clusters, shared vocabulary
 checklist.md     the coverage worksheet — resolve it with wpt-resolve.js
-boxes.json       the box list as generated, so --verify can spot a lost box
+boxes.json       internal: the box list as generated, so --verify spots a lost box
 state.json.gz    both full summaries, all ~120k tests
 sources/         each changed test's source, at the right revision
 ```

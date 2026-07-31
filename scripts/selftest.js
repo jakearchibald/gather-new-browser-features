@@ -695,6 +695,13 @@ function outputSizeChecks(dir) {
       ['wpt-fetch-tests.js', ['--area', '/css', '--top', '3', '--head', '10']],
       ['wpt-report.js', []],
     ];
+    // Only wpt-runs.js and wpt-collect.js operate without an artifact; everything else
+    // needs one named. Suggested commands used to omit it, relying on "there is only one
+    // comparison in tmp/" — which stops being true the moment a second is collected, and
+    // then every "continue with" line fails with "name the one you mean", exactly when
+    // someone is working across two. Asserting the property here rather than staging a
+    // second artifact, since the property is what has to hold.
+    const NEEDS_ARTIFACT = /node scripts\/wpt-(inventory|report|subtests|grep|state|fetch-tests|resolve)\.js/;
     const offenders = [];
     for (const [script, args] of probes) {
       let out;
@@ -707,7 +714,12 @@ function outputSizeChecks(dir) {
       }
       for (const line of out.split('\n')) {
         const m = line.match(RUNNABLE);
-        if (m && METACHAR.test(m[1])) offenders.push(`${script}: ${m[1].trim().slice(0, 90)}`);
+        if (!m) continue;
+        if (METACHAR.test(m[1])) {
+          offenders.push(`${script}: metacharacter — ${m[1].trim().slice(0, 80)}`);
+        } else if (NEEDS_ARTIFACT.test(m[1]) && !/(?:^|\s)(?:\/|\.{0,2}\/|tmp\/)\S*/.test(m[1].replace(/node scripts\/\S+/, ''))) {
+          offenders.push(`${script}: names no artifact — ${m[1].trim().slice(0, 80)}`);
+        }
       }
     }
     return offenders.length ? offenders.join('\n      ') : null;
@@ -850,7 +862,12 @@ function generalChecks(dir) {
       (t) => t.subtests && t.subtests.newlyPassing.some((s) => s.added),
     );
     if (!withAdded) return null;
-    const out = run('wpt-subtests.js', [dir, withAdded.test, '--only', 'newly-passing']);
+    // --all, because this counts RENDERED ROWS. Without it the check measures page 1 and
+    // compares it to the whole-artifact total, so it passes only while the probe file
+    // happens to fit one page — and fails the day discovery picks an artifact with a
+    // 1242-subtest file (109KB, five pages). Any row-counting check needs --all; this is
+    // the second one to have been written without it.
+    const out = run('wpt-subtests.js', [dir, withAdded.test, '--only', 'newly-passing', '--all']);
     const expected = withAdded.subtests.counts.newlyPassing;
     const shown = (out.match(/^  (?:\(new\)|\S+ +)-> PASS/gm) || []).length;
     if (shown !== expected) return `${expected} newly passing in the artifact, ${shown} rendered`;
@@ -892,8 +909,10 @@ function generalChecks(dir) {
     const grepLine = (out.match(/^# reach it with: +--grep (\S+)$/m) || [])[1];
     if (!grepLine) return 'no --grep route offered for a query path';
     if (/[?()|[\]$;<>*'"]/.test(grepLine)) return `the --grep fragment is not metachar-free: ${grepLine}`;
-    // And it has to actually select the test it is offered for.
-    const viaGrep = run('wpt-subtests.js', [dir, '--grep', grepLine]);
+    // And it has to actually select the test it is offered for. --all for the same
+    // reason as above: a fragment that matches many files puts the target on a later
+    // page, and "not on page 1" is not "not selected".
+    const viaGrep = run('wpt-subtests.js', [dir, '--grep', grepLine, '--all']);
     if (!viaGrep.includes(tricky.test)) return `--grep ${grepLine} does not reach ${tricky.test}`;
 
     const quoted = (out.match(/^# or as a literal path, shell-quoted: (.+)$/m) || [])[1];

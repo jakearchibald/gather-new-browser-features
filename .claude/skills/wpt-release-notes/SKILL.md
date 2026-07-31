@@ -139,7 +139,7 @@ The directory contains:
 | `diff.json` | every changed test file, with complete subtest evidence |
 | `report.txt` | the ranked view, directory clusters, shared vocabulary |
 | `checklist.md` | the coverage worksheet — tick it in place |
-| `boxes.json` | the box list as generated, so `--verify` can spot a lost box |
+| `boxes.json` | internal: the box list as generated, so `--verify` can spot a lost box. Not the source for verdict keys — use `wpt-resolve.js --list` |
 | `state.json.gz` | both full summaries, all ~120k tests |
 | `sources/` | each changed test's source, at the right revision |
 
@@ -225,8 +225,19 @@ resolved. Replace the box with `[x]`/`(x)` and append `" — <verdict>"`, one of
                                      way in the worker variant of the same file
 ```
 
-**Apply the verdicts as data, not as edits.** Write one file mapping each box path to
-its verdict, with the **Write tool** — never a shell heredoc, which prompts every time:
+**Apply the verdicts as data, not as edits.** Three steps:
+
+```bash
+node scripts/wpt-resolve.js <dir> --list    # 1. every box path with no verdict yet
+```
+
+**Get the keys from `--list`.** They have to be exact, and this is the only thing that
+emits them. Do not read them out of `boxes.json` — that is verification machinery for
+spotting a box that went missing, it lists boxes that are *already resolved* too, and
+it is not what the keys should be copied from.
+
+Then (2) write the file mapping path to verdict, with the **Write tool** — never a shell
+heredoc, which prompts every time:
 
 ```json
 {
@@ -237,9 +248,12 @@ its verdict, with the **Write tool** — never a shell heredoc, which prompts ev
 ```
 
 ```bash
-node scripts/wpt-resolve.js tmp/verdicts.json   # applies them, refuses on a bad key
-node scripts/wpt-inventory.js --verify          # exits non-zero while any remain
+node scripts/wpt-resolve.js <dir> tmp/verdicts.json   # 3. applies them
+node scripts/wpt-inventory.js <dir> --verify          # non-zero while any remain
 ```
+
+Name the artifact directory in every command once `tmp/` holds more than one comparison —
+the default only applies when there is exactly one.
 
 This is the single biggest saving available. One instrumented pass spent **106 Edit
 calls and ~40,000 output tokens — 22% of everything it generated — ticking boxes**, and

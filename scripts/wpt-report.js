@@ -65,7 +65,7 @@ for (let i = 0; i < argv.length; i++) {
 }
 if (opts.section.some((s) => !s)) fail('--section needs a value');
 
-const { report } = artifact.load(opts.dir, fail);
+const { paths: art, report } = artifact.load(opts.dir, fail);
 const lines = renderReport(report, { top: opts.top });
 
 // Split into blocks at "## " headings. Everything before the first heading is the
@@ -87,7 +87,7 @@ if (opts.list) {
     console.log(`  ${String(bytes).padStart(6)}B  ${s.heading}`);
   }
   console.log('');
-  console.log('Read one with:  node scripts/wpt-report.js --section <substring>');
+  console.log(`Read one with:  ${artifact.cmd('wpt-report.js', art)} --section clusters`);
   process.exit(0);
 }
 
@@ -129,7 +129,7 @@ if (opts.section.length) {
   console.log('');
 }
 
-const resume = ['node scripts/wpt-report.js']
+const resume = [artifact.cmd('wpt-report.js', art)]
   .concat(opts.section.flatMap((s) => ['--section', s]))
   .concat(opts.top !== 40 ? ['--top', String(opts.top)] : [])
   .join(' ');

@@ -37,7 +37,34 @@ const TMP = path.join(ROOT, 'tmp');
  * Root-relative is stable wherever the command was run from.
  */
 function rel(p) {
-  return path.relative(ROOT, p) || p;
+  const r = path.relative(ROOT, p);
+  // An artifact outside the repo — a scratch copy under $TMPDIR, say — relativises to
+  // "../../../../tmp/claude-501/foo", which is the same unreadable-and-fragile string
+  // this function exists to avoid, just measured from the other end. Absolute is
+  // shorter, clearer and correct from anywhere.
+  if (!r || r.startsWith('..')) return path.resolve(p);
+  return r;
+}
+
+/**
+ * The prefix for a command we are printing for someone to run, WITH the artifact
+ * directory in it.
+ *
+ * Every paginated view prints a "continue with" line, and they all used to omit the
+ * directory on the grounds that the analysis scripts default to the only comparison in
+ * tmp/. That holds until a second comparison is collected, and then every one of those
+ * lines is broken:
+ *
+ *   !!   node scripts/wpt-state.js --grep / --part 2
+ *   $ error: several collected comparisons in tmp/ — name the one you mean
+ *
+ * So the offered next command failed exactly when someone was working across two
+ * comparisons, which is when a "continue with" line is most needed. Naming the
+ * directory unconditionally costs a longer line and is correct however many artifacts
+ * exist; it is still a single bare command, which is what the permission rules match.
+ */
+function cmd(script, paths) {
+  return `node scripts/${script} ${rel(paths.dir)}`;
 }
 
 /** Directory name for a comparison, e.g. "firefox-beta-vs-firefox-experimental". */
@@ -132,4 +159,4 @@ function load(p, fail) {
   return { paths, report: JSON.parse(fs.readFileSync(paths.diff, 'utf8')) };
 }
 
-module.exports = { ROOT, TMP, rel, slugFor, defaultDir, discover, resolve, load };
+module.exports = { ROOT, TMP, rel, cmd, slugFor, defaultDir, discover, resolve, load };

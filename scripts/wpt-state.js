@@ -173,7 +173,7 @@ if (opts.grep) {
     lines: [`  ${fmtSide(r.before).padEnd(18)} -> ${fmtSide(r.after).padEnd(18)} `
       + `${r.moved ? '(moved)  ' : '         '}${r.test}`],
   }));
-  const resume = `node scripts/wpt-state.js --grep ${shellArg(opts.grep)}`
+  const resume = `${artifact.cmd('wpt-state.js', paths)} --grep ${shellArg(opts.grep)}`
     + (opts.only ? ` --only ${[...opts.only].join(',')}` : '');
   for (const line of page.render(blocks, {
     part: opts.part, all: opts.all, unit: 'tests', resume,
@@ -184,7 +184,7 @@ if (opts.grep) {
     const failing = rows.filter((r) => !r.passingAfter).length;
     console.log('');
     console.log(`${failing} of ${rows.length} are still failing in ${report.after.spec}. Just those:`);
-    console.log(`  node scripts/wpt-state.js --grep ${shellArg(opts.grep)} --only failing-after`);
+    console.log(`  ${artifact.cmd('wpt-state.js', paths)} --grep ${shellArg(opts.grep)} --only failing-after`);
   }
   process.exit(0);
 }
@@ -222,5 +222,5 @@ console.log('MOVED between the runs. Read the cause:');
 // --grep rather than the path, quoted or otherwise. A suggested command exists to be
 // pasted, and a `?query` path does not survive being pasted: quoted it breaks the
 // permission match, unquoted the shell globs it. The stem has neither problem.
-console.log(`  node scripts/wpt-subtests.js --grep ${grepFragment(opts.path)}`);
+console.log(`  ${artifact.cmd('wpt-subtests.js', paths)} --grep ${grepFragment(opts.path)}`);
 console.log(`  (in ${paths.dir})`);

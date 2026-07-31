@@ -498,7 +498,10 @@ function grepFragment(testPath) {
   return seg;
 }
 
-function renderChecklist(report, tests) {
+function renderChecklist(report, tests, { dir = '' } = {}) {
+  // The worksheet is read long after it is written, by which time tmp/ may hold more
+  // than one comparison — so the commands it suggests name their artifact.
+  const at = dir ? ` ${dir}` : '';
   const L = [];
   const p = (s = '') => L.push(s);
   const groups = groupByDir(tests);
@@ -558,7 +561,7 @@ function renderChecklist(report, tests) {
     p(`A "(?)" box (${opaque}) marks a file whose evidence names nothing — positional`);
     p('subtest names and messages like "assert_true: expected true got false".');
     p('Measured from the loaded subtest names, not guessed from the path. For those');
-    p('only, read the source:  node scripts/wpt-fetch-tests.js <dir> <path> --head 0');
+    p(`only, read the source:  node scripts/wpt-fetch-tests.js${at} --grep <fragment> --head 0`);
     if (collapsed) {
       p('');
       p(`${collapsed} generated variant(s) are folded into the box for their source file:`);
@@ -615,7 +618,7 @@ function renderChecklist(report, tests) {
         else if (doneCount) bits.push(`${doneCount} *done*`);
         p(`${box} ${base}   [${family.length} variants]`);
         p(`      ${bits.join(', ')}`);
-        p(`      read all ${family.length}:  node scripts/wpt-subtests.js --grep ${grepFragment(base)}`);
+        p(`      read all ${family.length}:  node scripts/wpt-subtests.js${at} --grep ${grepFragment(base)}`);
         // Listed, never summarised away: a folded variant the reader cannot see is a
         // box that silently stopped existing.
         let line = '      variants:';
