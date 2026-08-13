@@ -21,22 +21,22 @@ node scripts/wpt-collect.js --from firefox@beta --to firefox@nightly
 ```
 
 It streams both raw reports (~330MB each), records **every** subtest that changed state
-with its assertion message, stores both full summaries, and fetches the source of every
-changed test at the revision its run was tested at. A minute or two, once. It writes
-`tmp/<from>-vs-<to>/`:
+with its assertion message, stores both full summaries, fetches the source of every
+changed test at the revision its run was tested at, and measures how far behind upstream
+WPT's vendored test262 is. A minute or two, once. It writes `tmp/<from>-vs-<to>/`:
 
 ```text
-diff.json        every changed test file, with complete subtest evidence
-report.txt       the ranked view, directory clusters, shared vocabulary
+diff.json        every changed test file with complete subtest evidence, plus jsHorizon
+report.txt       the ranked view, directory clusters, shared vocabulary, JS horizon
 checklist.md     the coverage worksheet — resolve it with wpt-resolve.js
 boxes.json       internal: the box list as generated, so --verify spots a lost box
 state.json.gz    both full summaries, all ~120k tests
 sources/         each changed test's source, at the right revision
 ```
 
-**Everything after that is a local read.** Only `wpt-runs.js` and `wpt-collect.js` touch
-the network; `selftest.js` runs every analysis script with the proxy pointed at a closed
-port to keep it that way.
+**Everything after that is a local read.** Only `wpt-runs.js`, `wpt-collect.js` and
+`wpt-js-gaps.js` touch the network; `selftest.js` runs every analysis script with the proxy
+pointed at a closed port to keep it that way.
 
 ```bash
 node scripts/wpt-inventory.js --dirs                 # the map
@@ -47,6 +47,7 @@ node scripts/wpt-subtests.js  /fetch/http-cache/no-vary-search.tentative.any.htm
 node scripts/wpt-fetch-tests.js --area /fetch --top 3
 node scripts/wpt-grep.js      pseudoElement
 node scripts/wpt-state.js     --grep sound-state     # is there even a test?
+node scripts/wpt-js-gaps.js   --stored               # what JS features CANNOT be seen
 ```
 
 **Every view is paged.** A tool result holds roughly 30KB, and several of these views
@@ -79,18 +80,56 @@ it has no `--exclude` at all: an earlier default of `/third_party` hid the whole
 `Intl.Locale` info proposal. JavaScript and `Intl` features live in `third_party/test262`,
 never under a web-platform directory.
 
+**But reading it all still cannot find a JavaScript feature that was never tested here**,
+and that is not a hypothetical: WPT *vendors* test262 rather than tracking it, re-pinning
+the upstream revision by hand every few months. One Firefox comparison ran against a
+117-day-old snapshot, so the three TC39 Iterator proposals that release shipped —
+`Iterator.prototype.chunks`/`.windows`, `.includes` and `.join` — had **zero tests on either
+side**. Every tool correctly found nothing, including `wpt-state.js`, and the notes named
+none of the three. `wpt-js-gaps.js` measures that horizon by diffing test262's `features.txt`
+between the vendored revision and upstream, and each gap becomes a checklist box `--verify`
+will not pass without a verdict.
+
+**Those boxes come with their answers**, because the obvious way to answer them is also
+wrong. Told to "look the flag up in Bugzilla", the next pass found all three proposals and
+ruled them out — `quicksearch=iterator-chunking` returns zero bugs, and zero bugs read as
+"didn't ship". A flag name is test262's vocabulary; a vendor's is prose ("Ship Iterator
+Chunking proposal"). So the collector runs the query itself, against the *"to"* browser's
+own release source — Bugzilla for Firefox (`cf_status_firefox<N>` on a `Ship …` bug),
+[Chrome Platform Status](https://chromestatus.com) for Chrome and Edge (`status.text` plus
+`status.milestone_str`) — and prints the outcome on the box (`SHIPPED in 154`). A wording
+miss renders `NOT FOUND, so UNKNOWN`, never a "no", and `Implement <proposal>` being FIXED
+two releases earlier is reported as *not shipped*.
+
+**Safari has no machine-readable release source**, which is recorded as a named gap rather
+than discovered again: bugs.webkit.org is a Bugzilla whose REST API works, but it has no
+per-release status field, and `quicksearch=Iterator chunking` returns a 2015 Web Inspector
+bug — so reusing the Firefox logic there yields confident nonsense. Safari boxes get
+`no release source, so UNKNOWN` plus the release-notes URLs to check by hand.
+
+Alongside it, **[test262.fyi](https://test262.fyi) supplies the evidence Bugzilla lacks**:
+per-flag pass counts from real runs, twice per engine — with and without experimental
+options — so `78/78, default options` shows the feature works *and* is on by default, and
+`0/0` distinguishes "we cannot see it" from "nobody has written tests yet". It cannot
+replace Bugzilla, and that is checked rather than assumed: it tests one build per engine
+and for Gecko that is a nightly (`sm: 155.0a1`), it keeps no per-feature history
+(`history.json` is whole-suite totals, `gh-pages` is force-pushed to a single commit, and
+no dated per-feature endpoint exists). So it says what nightly does today; Bugzilla says
+which release turned it on. Both are printed, and a disagreement is reported as a finding.
+
 ## Scripts
 
 | Script | Purpose |
 | --- | --- |
 | [wpt-runs.js](scripts/wpt-runs.js) | What is on wpt.fyi: versions and dates per channel, and the collect command for the two commonest comparisons. Run this before choosing specs. |
-| [wpt-collect.js](scripts/wpt-collect.js) | Diffs two runs and writes the artifact directory everything else reads. With `wpt-runs.js`, the only script that uses the network. |
+| [wpt-collect.js](scripts/wpt-collect.js) | Diffs two runs and writes the artifact directory everything else reads. One of the three scripts that use the network. |
 | [wpt-inventory.js](scripts/wpt-inventory.js) | Every changed file with its subtest names, grouped by directory, ranked by nothing. `--verify` fails while any checklist box is unticked. |
 | [wpt-report.js](scripts/wpt-report.js) | The ranked view: per-kind sections, area rollups, directory clusters, shared vocabulary. `--section` picks one; `--top 0` shows a section in full. |
 | [wpt-subtests.js](scripts/wpt-subtests.js) | Every subtest of a file, with the assertion message behind each change, plus a rollup grouping them by message. Finds the *cause*, not just the count. |
 | [wpt-fetch-tests.js](scripts/wpt-fetch-tests.js) | Print cached test source so code examples are accurate rather than guessed — at the revision the runs were tested at, not `master`. |
 | [wpt-grep.js](scripts/wpt-grep.js) | Search subtest names and messages, paths, then test source. A filename often contains no word from the feature's name. |
 | [wpt-state.js](scripts/wpt-state.js) | Absolute pass/fail of any test in both runs, including the ~120k the diff omits. "Not in the diff" never means "not shipped". `--only failing-after` answers "what's still broken in this feature?". |
+| [wpt-js-gaps.js](scripts/wpt-js-gaps.js) | Which JavaScript features this comparison *cannot* show, because WPT's vendored test262 predates them — plus, from test262.fyi and the "to" vendor's release source, which of those actually shipped. Networked; `--stored` is the offline form, `--add` backfills the boxes into an older artifact. |
 | [wpt-resolve.js](scripts/wpt-resolve.js) | Apply a `{"box path": "verdict"}` file to the checklist. Exact keys only, no patterns, no fallback — a key matching no box writes nothing. Ticking boxes by hand cost 22% of one run's entire output. |
 | [selftest.js](scripts/selftest.js) | Asserts the tooling still surfaces the features it has historically missed, and that nothing but the collector touches the network. Run it after changing any of the above. |
 

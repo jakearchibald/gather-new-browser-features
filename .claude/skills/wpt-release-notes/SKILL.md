@@ -31,69 +31,49 @@ node scripts/…  ;  echo "---"  ;  node scripts/…     # NO — run them separ
 
 Four reasons, all of which have already cost something:
 
-- **A shell filter loses information invisibly.** Every view here already bounds itself:
-  output is paged at block boundaries, the synopsis and the message rollups come *first*,
-  and `--part`, `--only`, `--match`, `--include`, `--section` and `--top` narrow by meaning
-  rather than by line position. A pipe adds nothing except loss. Receipts: a `sed` range
-  arrived mangled but plausible; `tail -35` hid 12 of 24 subtests; `grep 'FAIL    -> PASS'`
-  caught 1 of 21; `head -40` showed 10 of 36.
+- **A shell filter loses information invisibly.** Every view already bounds itself — output
+  pages at block boundaries, synopses and message rollups come *first*, and `--part`,
+  `--only`, `--match`, `--include`, `--section` and `--top` narrow by meaning rather than by
+  line position. A pipe adds nothing but loss. Receipts: a `sed` range arrived mangled but
+  plausible; `tail -35` hid 12 of 24 subtests; `grep 'FAIL    -> PASS'` caught 1 of 21;
+  `head -40` showed 10 of 36.
 - **It turns every command into a permission prompt.** Rules match per sub-command across
-  pipes, `;`, `&&` and newlines, so `| head` or a chained `echo` means nothing in the
-  pipeline is pre-approved — even though the script itself is.
-- **`export` does not persist.** Shell variables are gone by the next call, so a `$D`
-  convention has to be repeated every time, and repeating it is what creates the compound
-  command. Every script defaults to the only collected comparison and prints which it used;
-  just omit the path.
-- **`cd` *does* persist.** One `cd` makes `node scripts/…` unresolvable in every later
-  command — and that failure happens before any script starts, so nothing can explain it.
-  Stay at the repository root.
+  pipes, `;`, `&&` and newlines, so one `| head` un-approves the whole pipeline.
+- **`export` does not persist**, so a `$D` convention has to be repeated every call — and
+  repeating it is what creates the compound command. Every script defaults to the only
+  collected comparison and prints which it used; just omit the path.
+- **`cd` *does* persist**, and makes `node scripts/…` unresolvable in every later command,
+  before any script starts, so nothing can explain it. Stay at the repository root.
 
-If output looks truncated, it will say so: `!! PART 2 OF 7` with the exact command to
-continue, or `!! END — all N shown` when there is nothing more. Believe those lines rather
-than reaching for a pipe.
+If output looks truncated it says so — `!! PART 2 OF 7` with the command to continue, or
+`!! END — all N shown`. Believe those lines rather than reaching for a pipe.
 
-**Put no quote characters in a command. Ever.** This is the whole rule, and it is stronger
-than "avoid metacharacters", because a quote mark is itself enough to stop a command being
-pre-approved. Two real failures, and the second is the one that matters:
+**Put no quote characters in a command. Ever.** Stronger than "avoid metacharacters",
+because a quote mark is itself enough to stop a command being pre-approved. `= - _ . /`
+never need quoting; only `? ( ) | [ ] * $ ; < > & \` and spaces do — and **defensive
+quoting is not free**: `wpt-grep.js 'popover=hint'` prompted, for quotes that bought
+nothing.
 
-```bash
-node scripts/wpt-subtests.js --grep 'html5lib_url.html?file=webkit02'  # quoted for the ?
-node scripts/wpt-grep.js 'popover=hint' --include /html/semantics/popovers   # quoted for NOTHING
-```
-
-Both prompted. In the second, `popover=hint` needs no quotes at all — `=` is an ordinary
-character in an argument — so the quotes were added defensively and bought a permission
-prompt for nothing. **Defensive quoting is not free.** `= - _ . /` never need quoting; only
-`? ( ) | [ ] * $ ; < > & \` and spaces do.
-
-So if a value would need quotes, **choose a different value** rather than quoting it. 17% of
-changed paths are WPT variants like `url-setters.any.html?exclude=(file|javascript|mailto)`,
-where `?` is a glob, `(…)` a glob group and `|` a pipe. Quoting genuinely is required to
-pass such a path to the shell — and it still prompts, so passing it is the wrong move.
-`--grep` on a metacharacter-free fragment has neither problem:
+So where a value *would* need quotes, **choose a different value.** 17% of changed paths are
+variants like `url-setters.any.html?exclude=(file|javascript|mailto)`, where `?` is a glob,
+`(…)` a glob group and `|` a pipe. Quoting is genuinely required to pass that to the shell,
+and it still prompts — so passing it is the wrong move. `--grep` on a metacharacter-free
+fragment has neither problem:
 
 ```bash
 node scripts/wpt-subtests.js --grep url-setters                   # yes
 node scripts/wpt-subtests.js /a.html /b.html --grep url-setters   # yes — additive
-node scripts/wpt-subtests.js '/html/syntax/parsing/html5lib_url.html?file=webkit02'  # runs, but prompts
-node scripts/wpt-subtests.js --grep webkit02                       # same test, no prompt
-node scripts/wpt-subtests.js /url/url-setters.any.html?exclude=(file|javascript|mailto)    # NO — shell error
+node scripts/wpt-subtests.js --grep webkit02                      # reaches a ?query variant
 ```
 
-The tooling no longer offers you a quoted path to copy. Where a `?query` path appears in a
-worksheet box or a suggested next command, it comes with the `--grep` fragment that reaches
-it. Anything still shown quoted is labelled as the literal-path fallback, and says that it
-will prompt.
+Nothing in the tooling offers you a quoted path to copy: where a `?query` path appears in a
+box or a suggested command, the `--grep` fragment that reaches it comes with it.
 
 `--grep <substring>` means the same thing on `wpt-inventory.js`, `wpt-subtests.js`,
 `wpt-fetch-tests.js` and `wpt-state.js`: a case-insensitive path substring, repeatable, and
-**additive with explicitly named paths** — so one command can mix "these two files" with
-"and whatever matches this". It also picks up sibling variants you would otherwise name one
-at a time. `--include` (and its alias `--area`) is the path-*prefix* selector for reading
-one area in full.
-
-Where a query path is printed, its safe form appears under it as `# paste as: …`, for the
-rare case you do need it literally.
+**additive with explicitly named paths**. It also picks up sibling variants you would
+otherwise name one at a time. `--include` (alias `--area`) is the path-*prefix* selector for
+reading one area in full.
 
 **`--verify` exiting 1 is the gate working, not a crash.** It exits non-zero until every
 checklist box has a real verdict, and says `GATE: NOT READY — n/m ticked`. That is the
@@ -126,8 +106,23 @@ node scripts/wpt-collect.js --from firefox@beta --to firefox@nightly
 ```
 
 Takes a minute or two. It streams both raw reports (~330MB each), records **every**
-subtest that changed state with its assertion message, stores both full summaries, and
-fetches the source of every changed test at the revision its run was tested at.
+subtest that changed state with its assertion message, stores both full summaries,
+fetches the source of every changed test at the revision its run was tested at, and
+measures how stale WPT's vendored test262 is — which is what tells you *which JavaScript
+features this comparison cannot show at all*. Watch for:
+
+```
+  test262 snapshot b66872a924 (117 days old); 5 upstream feature flag(s) have no tests here.
+  asking Bugzilla which of them shipped in Firefox 154...
+  3 of 5 shipped in 154, 1 with no bug found (UNKNOWN, not "no").
+    iterator-chunking -> bug 2047997 "Ship Iterator Chunking proposal"
+  asking test262.fyi whether they pass, and in which config...
+  4 tracked on SpiderMonkey 155.0a1 (NIGHTLY, not the release above), 1 have no tests upstream at all.
+```
+
+Those three lines are the only part of a collection run that is already a finished
+release-note finding rather than an input to one. They become checklist boxes carrying
+their own answers. See the test262 horizon in step 2.
 
 **Every later command finds this directory by itself** — they default to the only
 collected comparison in `tmp/` and print which one they used, so you never pass a path.
@@ -136,28 +131,26 @@ The directory contains:
 
 | File | What it is |
 | --- | --- |
-| `diff.json` | every changed test file, with complete subtest evidence |
-| `report.txt` | the ranked view, directory clusters, shared vocabulary |
+| `diff.json` | every changed test file with complete subtest evidence, plus `jsHorizon` |
+| `report.txt` | the ranked view, directory clusters, shared vocabulary, JS coverage horizon |
 | `checklist.md` | the coverage worksheet — tick it in place |
 | `boxes.json` | internal: the box list as generated, so `--verify` can spot a lost box. Not the source for verdict keys — use `wpt-resolve.js --list` |
 | `state.json.gz` | both full summaries, all ~120k tests |
 | `sources/` | each changed test's source, at the right revision |
 
-Specs are `product[@channel][@version]`. Channels: `stable`, `beta`, `experimental`
-(aliases: `nightly`, `release`, `tp`). Pin a version for notes between shipped releases —
-once 153 is stable, `stable` no longer means 152 — and keep the channel alongside it,
-because nightly runs outnumber stable ones ~50:1 and an unlabelled version search never
-reaches back far enough:
+Specs are `product[@channel][@version]`; channels are `stable`, `beta`, `experimental`
+(aliases `nightly`, `release`, `tp`). **Pin a version for notes between shipped releases** —
+once 153 is stable, `stable` no longer means 152 — and keep the channel alongside it, because
+nightly runs outnumber stable ones ~50:1 and an unlabelled version search never reaches back
+far enough:
 
 ```bash
 node scripts/wpt-collect.js --from firefox@stable@152 --to firefox@stable@153
 node scripts/wpt-collect.js --from chrome@stable --to firefox@nightly
 ```
 
-Add `--aligned` to force both runs onto the same WPT revision. Prefer it when you need
-confidence in small deltas; it may pick older runs, and it fails with a clear message
-when no shared revision exists (common between release channels, and impossible between
-two pinned versions).
+`--aligned` forces both runs onto the same WPT revision. Prefer it when you need confidence
+in small deltas; it may pick older runs, and it cannot work between two pinned versions.
 
 `tmp/` and `release-notes/` are gitignored. Never commit an artifact — it's a few MB and
 goes stale as new runs land.
@@ -176,13 +169,12 @@ The collector classifies each test file, which is what makes the analysis possib
 ## Step 2: Read the whole inventory
 
 **Start here, before any ranked view. Subtest count is not a signal of importance, so there
-is no threshold below which a change is safely ignorable.** A delta measures how many
-assertions happened to still be failing beforehand, nothing more: `webkit-pseudo-element.html
-5/6 -> 6/6 (+1)` was `-webkit-` prefixed pseudo-elements becoming valid, and
-`customizable-select/select-parsing.html 10/17 -> 17/17 (+7)` was the `<select>` parser
-keeping nested elements. Both shipped features, both sitting in ranked output and dismissed
-as rounding error next to a `+664`. No smarter ranking fixes that, because the premise is
-wrong. So read everything:
+is no threshold below which a change is safely ignorable.** A delta only measures how many
+assertions happened to still be failing beforehand: `webkit-pseudo-element.html 5/6 -> 6/6
+(+1)` was `-webkit-` pseudo-elements becoming valid, and `select-parsing.html 10/17 -> 17/17
+(+7)` was the `<select>` parser keeping nested elements. Both shipped features, both
+dismissed on a real pass as rounding error next to a `+664`. No smarter ranking fixes that,
+because the premise is wrong. So read everything:
 
 ```bash
 node scripts/wpt-inventory.js --dirs      # the map: one line per directory
@@ -215,7 +207,7 @@ breaks only between directories and tells you what you have not yet seen; `--inc
 bounded and loses nothing. Both beat `head`, `tail` and `sed` on the only axis that
 matters, which is whether you can tell what you missed.
 
-**Finish the worksheet.** The artifact's `checklist.md` has **two** lists, both of which must be
+**Finish the worksheet.** The artifact's `checklist.md` has **three** lists, all of which must be
 resolved. Replace the box with `[x]`/`(x)` and append `" — <verdict>"`, one of:
 
 ```
@@ -225,19 +217,20 @@ resolved. Replace the box with `[x]`/`(x)` and append `" — <verdict>"`, one of
                                      way in the worker variant of the same file
 ```
 
+**The three verdict kinds are a closed set** — `written up:`, `explained:`, `not a feature:`
+and nothing else. `regression:` is the natural fourth to reach for and is rejected; a bug or
+regression that goes in the notes is `written up:`, which means "this is in the notes", not
+"this is a feature". The gate names the offending prefix when it refuses one.
+
 **Apply the verdicts as data, not as edits.** Three steps:
 
 ```bash
 node scripts/wpt-resolve.js <dir> --list    # 1. every box path with no verdict yet
 ```
 
-**Get the keys from `--list`.** They have to be exact, and this is the only thing that
-emits them. Do not read them out of `boxes.json` — that is verification machinery for
-spotting a box that went missing, it lists boxes that are *already resolved* too, and
-it is not what the keys should be copied from.
-
-Then (2) write the file mapping path to verdict, with the **Write tool** — never a shell
-heredoc, which prompts every time:
+**Get the keys from `--list`** — they must be exact, and it is the only thing that emits
+them. Not from `boxes.json`, which is verification machinery and lists resolved boxes too.
+Then (2) write path→verdict with the **Write tool**, never a shell heredoc (which prompts):
 
 ```json
 {
@@ -255,50 +248,41 @@ node scripts/wpt-inventory.js <dir> --verify          # non-zero while any remai
 Name the artifact directory in every command once `tmp/` holds more than one comparison —
 the default only applies when there is exactly one.
 
-This is the single biggest saving available. One instrumented pass spent **106 Edit
-calls and ~40,000 output tokens — 22% of everything it generated — ticking boxes**, and
-the run was output-bound end to end (180,385 tokens in 29.2 minutes, 103 tok/s
-sustained). The same verdicts as a file are ~7,000 tokens, because an Edit has to
-restate its surrounding context to anchor itself. Keys are **exact** box paths; a key
-matching no box is an error that writes nothing, so a typo can't silently do nothing.
-Resolve in as many passes as you like.
+**This is the single biggest saving available** — ticking boxes by hand cost one
+instrumented pass 106 Edit calls and 22% of everything it generated, because an Edit has to
+restate its context to anchor itself. A key matching no box is an error that writes nothing,
+so a typo cannot silently do nothing. Resolve in as many passes as you like.
 
 1. **`[ ]` directories** (200–400 on a two-release diff). Churn-only ones arrive resolved.
 2. **`( )` / `(?)` files** — every `*done*` file plus every file whose evidence names
    nothing. **Ticking a directory does not tick these.**
+3. **`[ ] test262-feature:<flag>`** — JavaScript features with no test on either side,
+   because WPT's vendored test262 predates them. Usually a handful. The box already
+   carries Bugzilla's answer (`SHIPPED in 154, bug 2047997`); transcribe it, and **do not
+   re-check by searching the flag name — that returns nothing for features that shipped.**
+   See the test262 horizon above.
 
-`--verify` reads the verdicts, not just the boxes. Three things fail it:
+`--verify` reads the verdicts, not just the boxes, and says which of the three it rejected.
+Two rules follow from that:
 
-- **A tick with no verdict**, or a verdict that defers instead of answering. `— written up
-  — see notes` is rejected by name: it is what a bulk regex apply reaches for as its
-  fallback, and one attempt at resolving a worksheet that way would have stamped all 416
-  boxes and passed.
-- **`explained` that names nothing findable.** It must point at another box's path, at
-  another box's *written up* text, or at a numbered sibling (`same as -001`). Any of those
-  three is fine, and phrasing does not matter — what matters is that following the
-  reference lands somewhere. `explained: sundry plumbing wobbles` fails; it reads as an
-  explanation while saying only that the line has been set aside.
-- **A box that stopped existing.** The box list is recorded at collection time in
-  `boxes.json`, and `--verify` compares by path. So **edit boxes in place; do not rewrite
-  `checklist.md` wholesale.** A whole-file rewrite already dropped four lines on a real
-  pass while leaving the count at 416, which the old tick-counting gate could not see.
+- **A verdict must answer.** `written up — see notes` is rejected by name, and `explained`
+  must name something findable — another box's path, another box's *written up* text, or a
+  numbered sibling (`same as -001`). Phrasing does not matter; following the reference
+  landing somewhere does.
+- **Edit boxes in place; never rewrite `checklist.md` wholesale.** A whole-file rewrite
+  dropped four boxes on a real pass with the count still reading 416. `boxes.json` records
+  the box list at collection time so `--verify` catches that.
 
-**One verdict covers a variant family.** Boxes marked `[N variants]` fold together the
-`?class=`/`?include=` variants and the `.any.worker`/`.any.html` globals of one source
-file, listing every folded path. They are one question — the parameter picks which slice
-runs, not which feature the file covers. A worksheet that asked separately answered
-`text-box-trim-start-001.html` seventeen times, each a rewording of the last. Variants that
-moved *differently* are deliberately still separate boxes, because two globals of one test
-moving opposite ways is a flake signal that exists only as the comparison.
+**One verdict covers a variant family.** Boxes marked `[N variants]` fold the `?class=`
+variants and `.any.worker`/`.any.html` globals of one source file into one question — the
+parameter picks which slice runs, not which feature the file covers. Asked separately, a
+worksheet answered `text-box-trim-start-001.html` seventeen times. Variants that moved
+*differently* stay separate boxes: two globals moving opposite ways is a flake signal that
+exists only as the comparison.
 
-This is enforced rather than advised because "read it all" failed twice as an instruction.
-The Popover API rework was missed while `/html/semantics/popovers [5 files, +19 subtests,
-5 fwd, 5 done]` was on screen and had been quoted as "not yet examined" — nothing was
-missing but a completion criterion. Then `/svg/types/scripted` was ticked as "mostly new
-SVGLength tests", true of five files and wrong about the sixth, which was
-`SVGTextPathElement.side` shipping: a directory verdict absorbs the files inside it, and
-"3 done" is a number you skim rather than a question you answer. Hence file-level boxes,
-and a `--verify` that fails.
+This is a gate rather than advice because "read it all" failed twice as an instruction —
+once with the strongest signal the tooling emits already on screen, and once because a
+directory verdict silently absorbed a file inside it. Hence file-level boxes too.
 
 - **Verdict every line before writing any prose.** Drafting first and returning to the list
   later is the exact path that skipped popovers.
@@ -315,10 +299,9 @@ by path guess). For those only, read the source:
 node scripts/wpt-fetch-tests.js <path> --head 0
 ```
 
-**Nothing is excluded, and there is no flag to exclude anything.** Every filter is
-somewhere a feature can hide. An earlier default of `/third_party` hid the entire
-`Intl.Locale` info proposal — 42 files under `third_party/test262/test/intl402/Locale/`,
-every one `0/1 -> 1/1`.
+**Nothing is excluded, and there is no flag to exclude anything.** Every filter is somewhere
+a feature can hide: an earlier default of `/third_party` hid the entire `Intl.Locale` info
+proposal, 42 files all `0/1 -> 1/1`.
 
 **JavaScript and `Intl` features live in `third_party/test262`**, never under `/css`,
 `/html` or any area you would think to check. One assertion per file makes it *look* like
@@ -327,6 +310,54 @@ assertion starting to hold, and dozens under one proposal's directory is a clean
 signal than most web-platform directories produce. Scan that block for proposal-shaped
 directory names (`intl402/Locale/prototype/getTimeZones`,
 `language/expressions/dynamic-import`) rather than skimming past it.
+
+**…but reading that block to the last line is still not enough, and this is the one gap
+reading cannot close.** WPT *vendors* test262 rather than tracking it, re-pinning the
+upstream revision by hand every few months, so a feature whose test262 tests landed past
+that pin has **no test in either run**. Firefox 154 shipped Iterator Chunking, Includes and
+Join into a 117-day-old snapshot; `wpt-grep.js Iterator` and `wpt-state.js --grep
+Iterator/prototype/chunks` both correctly found nothing, and the notes named none of them.
+Unlike every other miss here, the tooling's silence is indistinguishable from the feature
+not shipping — including `wpt-state.js`, which reads the same two summaries.
+
+So the collector measures the horizon, turns each gap into a box `--verify` will not pass,
+**and answers it for you** — from test262.fyi (does it work, and is it on by default) and
+the "to" vendor's own release source (which version). Read the answer off the box:
+
+```
+[ ] test262-feature:iterator-chunking   (no test here; SHIPPED in 154, bug 2047997)
+      SHIPPED in Firefox 154. Write it up.
+      2047997: "Ship Iterator Chunking proposal" [RESOLVED FIXED, 154 Branch]
+      test262.fyi: 78/78 pass on SpiderMonkey 155.0a1 (NIGHTLY, not the release above)
+```
+
+**Do not re-derive it, and above all do not search a bug tracker for the flag name** —
+`quicksearch=iterator-chunking` returns zero bugs for a feature that shipped, because the
+flag is test262's vocabulary and a vendor's is prose ("Ship Iterator Chunking proposal").
+A pass that did exactly this got three empty result sets and reported "none of them
+shipped": worse than the original miss, because the features were found and then ruled out.
+
+| On the box | Means |
+| --- | --- |
+| `SHIPPED in <N>` | It shipped. Write it up. |
+| `shipped before <N>` | Available, but not news for this release. |
+| `shipped, but not in <N>` | Attributed to another version. Check it. |
+| `not on by default in <N>` | Behind a pref. **Implemented is not shipped** — `Implement …` is routinely fixed one or two releases before `Ship …`. |
+| `changed in <N>, not enabled` | Something landed, nothing turned it on. |
+| `not shipped` | The vendor tracks it and does not have it on. |
+| `test262 needs experimental options` | Flag-gated even in nightly. Not available. |
+| `NOT FOUND, so UNKNOWN` | **The wording missed. Not a "no."** Weigh the enumerated `Ship …` list and the test262.fyi numbers. |
+| `no test262 tests exist yet` | Registered upstream with nothing behind it, so nothing can measure it. |
+| `no release source, so UNKNOWN` | Safari, which has none. Follow the URLs on the box. |
+
+Sources per "to" browser: Firefox → Bugzilla, Chrome/Edge → Chrome Platform Status,
+**Safari → nothing machine-readable** (WebKit's Bugzilla has no per-release status field, and
+`quicksearch=Iterator chunking` there returns a 2015 Web Inspector bug — so a Safari box is
+UNKNOWN plus release-note URLs, never a "no"). Where the two sources disagree, say so: a
+feature the vendor calls shipped that only passes with experimental options is preffed off.
+To ask again, or for an artifact predating the check: `node scripts/wpt-js-gaps.js`
+(`--stored` for the offline answer, `--add` to backfill the boxes). Full rationale is in
+`scripts/lib/test262.js`, `shipped.js` and `test262fyi.js`.
 
 **Watch the `*done*` marker.** Every remaining failure in the file cleared. It is the
 strongest "a feature shipped" signal available *and* independent of delta size, the exact
@@ -337,9 +368,8 @@ with `*done*` means "small because it was nearly finished".
 the runs are on different WPT revisions, not that the browser changed.
 
 Two sections of the ranked report generate leads the inventory's alphabetical order won't.
-Read them with `wpt-report.js` rather than opening `report.txt` — both sections sit at the
-*end* of that file, so a line-window read of it shows the overall stats and misses exactly
-these:
+Read them with `wpt-report.js`, not by opening `report.txt` — both sit at the *end* of that
+file, so a line-window read of it misses exactly these:
 
 ```bash
 node scripts/wpt-report.js --list                  # what sections exist
@@ -347,17 +377,14 @@ node scripts/wpt-report.js --section clusters
 node scripts/wpt-report.js --section vocabulary
 ```
 
-
 - **Directory clusters** ranks directories by how many files moved and how one-sided the
-  movement was, linking one change across several directories — the `<select>` work also
-  moved 28 files in `/html/syntax/parsing`, which otherwise reads as an unrelated parser
-  area. Nothing is excluded by path, so test262 proposals surface here (`dynamic-import`,
-  48 files). `--cluster-min` and `--cluster-ratio` widen it at collection time.
-- **One feature, several directories** does the same on subtest vocabulary instead of
-  paths: a token in newly-passing names under 2+ directories is probably one change.
-  `field-sizing` appeared across `/css/css-cascade`, `/css/css-ui`,
-  `/html/rendering/widgets` and `/web-animations` — one feature, four places, and the
-  mechanical answer to "group by feature, not by directory".
+  movement was, linking one change across several — the `<select>` work also moved 28 files
+  in `/html/syntax/parsing`, which reads as an unrelated parser area. Nothing is excluded by
+  path, so test262 proposals surface here too. `--cluster-min`/`--cluster-ratio` widen it at
+  collection time.
+- **One feature, several directories** does the same on subtest vocabulary: a token in
+  newly-passing names under 2+ directories is probably one change. `field-sizing` appeared
+  across `/css/css-cascade`, `/css/css-ui`, `/html/rendering/widgets` and `/web-animations`.
 
 Both are ranked, so both are hints. The inventory is the coverage guarantee.
 
@@ -395,34 +422,25 @@ among both the fixes and what still fails — then prints every subtest that cha
 **with the message from the failing side**, the actual expected-vs-got. For a path with a
 `?query` variant, **use `--grep`** rather than the path (see "Running the commands").
 
-**Why the no-pipe rule matters most here** (see "Running the commands"): this is the one
-place a shell filter produces a *confidently wrong* finding rather than a visible gap — you
-have the right file, so nothing feels missing. A real pass read
-`webrtc-stats/supported-stats.https.html`'s 24 new subtests via `tail -35`, saw the last 6
-(candidate stats), wrote up exactly those, and missed the 12 `RTCTransportStats` properties
-(`dtlsCipher`, `dtlsRole`, `tlsVersion`, `srtpCipher`, …) in the middle — a whole stats type
-newly reported, not IDL polish. Long output is information about a file's importance, not a
-reason to sample it.
+**This is where a shell filter is most dangerous**, because it produces a *confidently
+wrong* finding rather than a visible gap — you have the right file, so nothing feels
+missing. A real pass read `supported-stats.https.html`'s 24 new subtests via `tail -35`, saw
+the last 6, wrote up exactly those, and missed the 12 `RTCTransportStats` properties in the
+middle: a whole stats type newly reported, not IDL polish. Long output is information about
+a file's importance, not a reason to sample it. A `sed` range is worse still, because it
+fails quietly: nearly every subtest name in `color-computed-color-mix-function.html`
+contains `color-mix`, so a `/color-mix/,/^====/p` range restarts on almost every line and
+silently drops the header, the section titles and the synopsis.
 
-**A `sed` range is worse than `head`, because it fails quietly.** Slicing
-`color-computed-color-mix-function.html` with `sed -n '/color-mix/,/^====/p'` looks
-reasonable and arrives mangled: nearly every subtest name contains `color-mix`, so the
-range restarts on almost every line, silently dropping the header, the section titles and
-the synopsis. The result reads like a complete answer.
-
-**When you want a bounded read, bound it by meaning with `--match` or `--only`.** `--match`
-filters on name and message; `--only newly-passing` (also `newly-failing`, `changed`,
-`removed`, `still-failing`) filters by transition category. Both say they filtered and
-still report the file's true totals — so "51 of 57 still-failing subtests are `0%`-sum
-mixes" is a claim you can make, which no line window can support.
-
-**Do not grep for an arrow to get "just the newly-passing".** `grep 'FAIL    -> PASS'`
-is lossy invisibly: it misses a subtest that was `NOTRUN` or `TIMEOUT` before, and misses
-`(new)   -> PASS` — a brand-new assertion that holds — entirely. That last omission is how
-an *entirely new interface* appears, so the pattern fails hardest on exactly the claim it
-gets reached for. On one real diff it under-reported in 19 files, hiding 55 new-subtest
-passes and 13 non-FAIL priors out of 1018. It also discards the `was:` messages, which are
-the reason this step exists. Use `--only newly-passing`.
+**Bound a read by meaning instead, with `--match` or `--only`.** `--match` filters on name
+and message; `--only newly-passing` (also `newly-failing`, `changed`, `removed`,
+`still-failing`) filters by transition. Both say they filtered and still report the file's
+true totals — so "51 of 57 still-failing subtests are `0%`-sum mixes" is a claim you can
+make, which no line window can support. In particular **do not grep for an arrow** to get
+the newly-passing: `grep 'FAIL    -> PASS'` misses a prior `NOTRUN`/`TIMEOUT`, misses
+`(new)   -> PASS` — a brand-new assertion, which is how an entirely new interface appears —
+and discards the `was:` messages this whole step exists for. It under-reported in 19 files
+on one diff, hiding 55 new-subtest passes. Use `--only newly-passing`.
 
 Why this step is mandatory: `getComputedTiming() 26/41 → 41/41` reads like fifteen timing
 fixes. The messages showed all fifteen were `startTime expected 0 but got undefined` —
@@ -478,33 +496,26 @@ Apply the same rule to regressions — `cookieStore.set` losing two subtests tur
 be `expected "cookie-value" but got "deleted"`, which is a describable bug rather than a
 number.
 
-**An IDL member count is not a WPT finding.** When a dictionary or interface is newly
-reported, the obvious next move is to read its definition — and then the *spec's* member
-count silently becomes the claim. `RTCCertificateStats` has 4 newly-passing subtests in one
-real diff (`fingerprint`, `fingerprintAlgorithm`, `base64Certificate`, plus one behavioural
-test) and `RTCTransportStats` has 4 (`bytesSent`, `bytesReceived`, `localCertificateId`,
-`remoteCertificateId`); both were first written up as "6 members", a number that came from
-the IDL rather than from any test. The IDL tells you which members *exist*; only the
-subtests tell you which ones a browser now *reports*. Count the subtests, and say "4 of its
-members now report" rather than implying the whole dictionary landed.
+**An IDL member count is not a WPT finding.** When an interface is newly reported, the
+obvious next move is to read its definition — and then the *spec's* member count silently
+becomes the claim. `RTCCertificateStats` has 4 newly-passing subtests and was first written
+up as "6 members", a number that came from the IDL and from no test. The IDL says which
+members *exist*; only the subtests say which a browser now *reports*. Count the subtests.
 
 **Added/removed *subtests* at the same WPT revision are a behaviour change, not churn.**
 This one inverts. `text-decoration-inset-auto.html` went 52/73 → 73/73 with 20 subtests
-removed and 20 added, and was written up as "the test's own restructuring, with one real
-fix" — 20 of 21 dismissed. But both runs were at the same revision, so the test source was
-byte-identical and no restructuring was possible:
+removed and 20 added, and was written up as test restructuring — 20 of 21 dismissed. But
+both runs were at the same revision, so the source was byte-identical:
 
 ```
 removed:  … from [auto] to [10px -20px] at (-1) should be [NaNpx NaNpx]
 added:    … from [auto] to [10px -20px] at (-1) should be [-7.44px 22.56px]
 ```
 
-The expected value is baked into the subtest *name*, so a rename means the browser's
-computed value changed: `text-decoration-inset: auto` had been computing to `NaN`. All 21
-subtests are that one fix. `wpt-subtests.js` now detects the pairing and says so loudly —
-but the words "added" and "removed" mean churn only when the revisions *differ*, and the
-report's header tells you which case you are in. Check the revision before calling
-anything churn.
+The expected value is baked into the subtest *name*, so a rename means the computed value
+changed: `text-decoration-inset: auto` had been computing to `NaN`, and all 21 subtests are
+that one fix. `wpt-subtests.js` detects the pairing and says so, but "added" and "removed"
+mean churn only when the revisions *differ* — check which case you are in first.
 
 **A matching directory name is not evidence.** The trap is worst when you already hold a
 claim — a changelog entry, a bug, "did X ship?" — and a directory whose name matches it
@@ -540,6 +551,18 @@ cleanly and the snippet you copy never produced your result.
 `foo.any.js`), which is the file with real content. Every snippet in the notes should trace
 to a test that now passes. This is the single biggest accuracy win: spec-shaped guesses look
 plausible and are often wrong.
+
+**The one exception, and it has its own source.** A past-the-horizon JS feature (the
+`test262-feature:` boxes) has no test in the artifact, so this rule has nothing local to
+point at — which is exactly when a snippet gets written from memory carrying the same
+implied authority as one copied from source. One pass nearly shipped `chunks`/`windows` that
+way. The tests are not missing, only missing *here*: the collector resolves each flag to its
+upstream test262 directory and fetches a sample, so copy from that and say the snippet is
+upstream-derived rather than taken from a test that ran in this comparison.
+
+```bash
+node scripts/wpt-js-gaps.js --stored   # the sample tests, in full, offline
+```
 
 ## Step 5: Interpret — the traps
 
@@ -586,16 +609,22 @@ now asserts the ones a tool can guard, so they fail loudly instead of being reme
 | `:muted` content attribute | not in the diff at all: `unchanged` in both runs | `wpt-state.js` |
 | `SVGTextPathElement.side` | a directory verdict absorbed a `+1 *done*` file named after an IDL interface | file-level boxes |
 | `getAnimations({ pseudoElement })` | not `*done*` (`::part()` still fails), so a done-only worksheet gave it no box | complete subtest evidence |
+| Iterator Chunking / Includes / Join | **not a reading failure at all**: WPT vendors test262, the snapshot was 117 days stale, so three shipped proposals had zero tests in either run | `wpt-js-gaps.js`; `test262-feature:` boxes |
+| …the same three, again | surfaced as boxes, then **ruled out**: a Bugzilla search on the test262 flag name returns zero bugs for all three, and the empty result was read as "didn't ship" | the collector runs the query itself, in Bugzilla's wording, and prints the answer on the box |
 
 **Every place output gets shortened is a place a feature disappears** — a rank cut, a
-default exclusion, a `tail`, or stopping when the interesting-looking entries run out.
-Prefer reading more with no filter over reading less with a clever one.
+default exclusion, a `tail`, or stopping when the interesting-looking entries run out. Prefer
+reading more with no filter over reading less with a clever one.
 
-The last two share a shape worth naming: **both were named after an IDL interface, and
-neither path contained the word that named the feature** — `side` and `pseudoElement` appear
-nowhere in `SVGAnimatedEnumeration-SVGTextPathElement.html` or `Animatable/getAnimations.html`.
-When a filename describes a *type* rather than a *behaviour*, the path is not evidence, which
-is the whole reason subtest names are loaded up front instead of inferred from paths.
+The last two rows break that pattern and are worth holding separately: **reading more cannot
+fix a feature that was never tested**, and **an empty search result is not a finding.** Note
+which way the second ran — the tooling was right, the lookup was wrong, and the lookup won.
+When a box carries an answer, that answer *is* the evidence.
+
+`SVGTextPathElement.side` and `getAnimations({ pseudoElement })` share a shape worth naming:
+both were named after an IDL interface, and **neither path contained the word that named the
+feature**. When a filename describes a *type* rather than a *behaviour*, the path is not
+evidence — which is why subtest names are loaded up front rather than inferred from paths.
 
 **When someone asks whether a change is missing, assume they're right until the data says
 otherwise** — and verify it properly rather than grepping paths for their wording. See
@@ -679,14 +708,22 @@ A `:muted` pseudo-class change lives in `css/selectors/media/sound-state.html`; 
 for "muted" finds `muted-playbackrate.tentative.html`, which is about `playbackRate` and
 unrelated.
 
-There are four honest answers, and three of them are not "yes":
+There are five honest answers, and four of them are not "yes":
 
 | Finding | Report it as |
 | --- | --- |
 | Tests moved, messages describe the claim | Confirmed. Quote the message and path. |
 | Tests moved, messages describe something else | A *different* change. Report both facts. |
 | Test exists, identical in both runs | Not in this diff. Check absolute state before saying "not shipped". |
+| No test matches, and it's a JS/`Intl` feature | Check the horizon first — `wpt-js-gaps.js`. "Past the test262 snapshot" and "untested" are different answers. |
 | No test matches at all | No WPT coverage. Say so plainly. |
+
+**For anything JavaScript, "no test matches" is the answer that needs one more step**, and
+the step is `node scripts/wpt-js-gaps.js` — not a bug search. `Iterator.prototype.chunks`
+returned zero matches from every layer of `wpt-grep.js` and zero from `wpt-state.js`, and it
+had shipped. If the flag is in the horizon's missing list, the honest sentence is "WPT has no
+test for this at the revision these runs used", followed by what the vendor source says. See
+the test262 horizon in step 2 for why searching the flag name answers "no" incorrectly.
 
 **A diff cannot tell you a feature is still missing.** A file with the same pass count in
 both runs is `unchanged` and legitimately absent from every view here, so "not in the diff"
@@ -707,7 +744,9 @@ not a footnote, and it is invisible unless you ask for it.
 
 Things with no WPT coverage at all, and so invisible here regardless: rendering fixes with
 no reftest, "stopped working after several navigations"-style bugs, event *ordering* changes
-where only the negative case is tested, and anything whose spec has no tests yet. Absence of
+where only the negative case is tested, anything whose spec has no tests yet, and **any
+JavaScript feature newer than WPT's vendored test262 snapshot** — the last of which is
+measurable rather than merely possible, and is what `wpt-js-gaps.js` measures. Absence of
 evidence is genuinely not evidence of absence — say "no coverage", not "didn't ship", and
 point at Bugzilla for confirmation.
 
@@ -716,6 +755,20 @@ point at Bugzilla for confirmation.
 - API docs: https://github.com/web-platform-tests/wpt.fyi/blob/main/api/README.md
 - Results UI: `https://wpt.fyi/results/<test-path>?product=firefox@beta&product=firefox@experimental`
 - Test source: `https://github.com/web-platform-tests/wpt/blob/master/<path>`
+- Which test262 a WPT revision vendors:
+  `https://github.com/web-platform-tests/wpt/blob/<wpt-rev>/third_party/test262/vendored.toml`
+- Every test262 feature flag, with proposal links:
+  `https://github.com/tc39/test262/blob/main/features.txt` — the set difference against the
+  vendored revision's copy is what `wpt-js-gaps.js` reports
+- What shipped in a Firefox release, per Bugzilla — the per-release status flag, not the
+  resolution or the milestone. This query needs no guess about wording, which is why it is
+  the primary source:
+  `/rest/bug?f1=cf_status_firefox154&o1=equals&v1=fixed&f2=short_desc&o2=substring&v2=Ship`
+- test262 results per engine, per feature flag, in default and experimental configurations:
+  `https://data.test262.fyi/meta.json` (also `index.json`, and `history.json` for per-date
+  engine versions with whole-suite totals). Current data only — the engine builds are
+  nightlies and there is no per-feature history, so it cannot attribute a feature to a
+  release. Rendered by `wpt-js-gaps.js` beside the Bugzilla answer.
 - `/api/runs` rejects `product=firefox@beta` (400); channels go via `label`, and one
   `label` applies to all products — which is why `--aligned` intersects `/api/shas`
   per spec instead of using `aligned=true`.

@@ -100,6 +100,10 @@ if (opts.list) {
  * fails on exactly the two sections the skill tells you to read.
  */
 const ALIASES = [
+  // Nothing in this heading is a word anyone will type. The words they will type are
+  // the ones they are looking for a feature *in* — "javascript", "js", "test262" —
+  // and the section is precisely a list of JS features no other section can hold.
+  [/^JavaScript coverage horizon/, 'javascript js test262 ecmascript tc39 gaps horizon blindspot missing'],
   [/^Directory clusters/, 'clusters cluster directories leads'],
   [/^One feature, several directories/, 'vocabulary tokens feature-across-areas leads'],
   [/no subtests \(reftests/, 'reftests reftest rendering'],

@@ -141,7 +141,10 @@ if (opts.list) {
     process.exit(0);
   }
   console.log(`# ${blocks.length} box(es) with no verdict yet, in ${artifact.rel(paths.checklist)}`);
-  console.log('# Use these EXACTLY as keys in the verdicts file. Trailing "#" is a comment.');
+  // "Use these EXACTLY as keys" sat directly above lines that are not usable as-is, which
+  // reads as a contradiction. Lead with where the key ends.
+  console.log('# The key is everything BEFORE the "   #" — that part is a comment, not part of');
+  console.log('# the key. Copy the key exactly: a typo matches no box and writes nothing.');
   console.log('');
   for (const line of page.render(blocks, {
     part: opts.part,

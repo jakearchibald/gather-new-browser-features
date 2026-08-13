@@ -128,6 +128,345 @@ function dirBits(g) {
 }
 
 // ---------------------------------------------------------------------------
+// The JavaScript coverage horizon
+// ---------------------------------------------------------------------------
+
+/**
+ * One box path per gapped feature flag, stable across renders.
+ *
+ * Prefixed and colon-joined so it is a single whitespace-free token — the shape every
+ * box parser here expects — and so it can never collide with a test path. It also has
+ * to survive being pasted into a shell as a wpt-resolve.js key, so no flag character
+ * may need quoting; `Iterator.prototype.join` and `iterator-chunking` are both fine,
+ * since test262 flag names are drawn from letters, digits, `.`, `-` and `_`.
+ */
+function jsBoxPath(name) {
+  return `test262-feature:${name}`;
+}
+
+/**
+ * What Bugzilla said about one gapped feature, as a short parenthetical and a longer
+ * explanation.
+ *
+ * Rendered ONTO the box rather than left for the reader to look up, because the lookup is
+ * where this went wrong. The worksheet said "look the flag up in Bugzilla", and
+ * `quicksearch=iterator-chunking` returns zero bugs for a feature that shipped — so all
+ * three Iterator proposals were surfaced, investigated, and dismissed. A finding the
+ * reader has to re-derive is a finding that can be re-derived wrongly.
+ *
+ * Two constraints on the short form, both mechanical. It must contain no em dash and no
+ * space-surrounded hyphen, since `verdictOf` reads the first of those as the start of the
+ * reader's verdict; and none of the words in NON_ANSWER, or the gate would reject an
+ * otherwise good verdict on the strength of text the generator put there.
+ */
+function jsFinding(h, name) {
+  const sh = h && h.shipped;
+  const fyi = jsFyiLines(h, name);
+  // Appended to whatever the outcome is: even a "not shipped" box benefits, since the next
+  // reader may be writing it up for a later release.
+  fyi.lines = [...fyi.lines, ...jsUpstreamLines(h, name)];
+  if (!sh) {
+    return fyi.lines.length ? { short: fyi.short || '', lines: fyi.lines } : null;
+  }
+  if (!sh.ok) {
+    // Two very different reasons, and neither is a "no". `unsupported` is a known limit
+    // with somewhere else to look; anything else is a transient failure.
+    const lines = [`${sh.unsupported ? 'No release source' : 'Lookup failed'}: ${sh.error}.`,
+      'This box is UNANSWERED, not answered "no".'];
+    for (const url of sh.lookAt || []) lines.push(`  check by hand: ${url}`);
+    return {
+      short: sh.unsupported ? 'no release source, so UNKNOWN' : 'lookup failed, so UNKNOWN',
+      lines: [...lines, ...fyi.lines],
+    };
+  }
+  const f = sh.findings.find((x) => x.feature.name === name);
+  if (!f) return fyi.lines.length ? { short: fyi.short, lines: fyi.lines } : null;
+
+  const v = sh.version;
+  const src = sh.source;
+  const ev = f.evidence || [];
+  switch (f.outcome) {
+    case 'shipped':
+      return {
+        short: `SHIPPED in ${v}`,
+        lines: [`SHIPPED in ${sh.product} ${v}, per ${src}. Write it up.`, ...ev, ...fyi.lines],
+      };
+    case 'shipped-earlier':
+      return {
+        short: `shipped before ${v}`,
+        lines: [`On by default since an earlier release, so it is available in ${v} but is not`,
+          'news for it. Check the milestone before claiming it as new.', ...ev, ...fyi.lines],
+      };
+    case 'shipped-other-version':
+      return {
+        short: `shipped, but not in ${v}`,
+        lines: [`On by default, but attributed to a different version than ${v}. Read the`,
+          'milestone before claiming it for this release.', ...ev, ...fyi.lines],
+      };
+    case 'gated':
+      return {
+        short: `not on by default in ${v}`,
+        lines: ['It exists but is behind a flag or pref for this release. Implemented is NOT',
+          'shipped: do not write it up as available.', ...ev, ...fyi.lines],
+      };
+    case 'changed-not-shipped':
+      return {
+        short: `changed in ${v}, not enabled`,
+        lines: [`Something landed in ${v} but nothing that turns the feature on, so it is`,
+          'probably still preffed off. Read the evidence.', ...ev, ...fyi.lines],
+      };
+    case 'not-shipped':
+      return {
+        short: 'not shipped',
+        lines: [`${src} tracks it and does not have it on by default.`, ...ev, ...fyi.lines],
+      };
+    case 'error':
+      return {
+        short: 'lookup failed, so UNKNOWN',
+        lines: ['This box is UNANSWERED, not answered "no".', ...ev, ...fyi.lines],
+      };
+    case 'unknown':
+    default:
+      return {
+        // When test262.fyi has something to say here it is the deciding evidence, because
+        // the release-attribution side found nothing at all.
+        short: fyi.short || 'NOT FOUND, so UNKNOWN',
+        lines: [`${src} returned nothing usable for this flag. That is NOT a "no" — the`,
+          'search is over prose feature names, and a test262 flag name matches nothing even',
+          'for features that have shipped. Weigh the measurement below and the enumerated',
+          'list above, then answer.', ...ev, ...fyi.lines],
+      };
+  }
+}
+
+const jsBugUrl = (id) => `https://bugzilla.mozilla.org/show_bug.cgi?id=${id}`;
+
+/**
+ * Where to copy a gapped feature's code example from.
+ *
+ * Step 4's rule — every snippet traces to a passing test — is unsatisfiable for a
+ * past-the-horizon feature using the artifact alone, and that is precisely when a snippet
+ * gets written from memory with the same implied authority as one copied from source. The
+ * tests exist upstream, so point at them by path and offer the sample the collector fetched.
+ *
+ * "Lookup truncated" and "no tests exist" are kept apart, because the compare endpoint caps
+ * at 300 files and a stale snapshot can hide a flag behind that cap. test262.fyi's per-flag
+ * count is the tiebreak: it knows how many tests a flag has regardless of the cap.
+ */
+function jsUpstreamLines(h, name) {
+  const up = h && h.upstreamTests;
+  if (!up || !up.ok) return [];
+  const f = up.flags && up.flags[name];
+  if (!f) return [];
+  const fyi = h.fyi && h.fyi.ok && h.fyi.results && h.fyi.results[name];
+  if (!f.dirs.length) {
+    if (fyi && fyi.noTests) return [];      // nothing to point at; jsFyiLines already says so
+    if (f.truncated) {
+      return ['upstream tests: lookup truncated (the compare API caps at 300 files), so this',
+        '  is NOT "no tests upstream". Search tc39/test262 for the flag in test frontmatter.'];
+    }
+    return [];
+  }
+  const out = [`upstream tests: ${f.dirs.join(', ')}`,
+    '  There is no test HERE to copy an example from, so copy it from one of those rather',
+    '  than writing the syntax from memory, and say the snippet is upstream-derived.'];
+  for (const sm of f.samples) out.push(`  sample: ${sm.url}`);
+  if (f.samples.length) out.push('  (full source in: node scripts/wpt-js-gaps.js --stored)');
+  return out;
+}
+
+/**
+ * test262.fyi's measurement for one flag: executed test counts, and whether the feature
+ * needed experimental options.
+ *
+ * `short` is only populated when the measurement CHANGES the reading of the Bugzilla
+ * outcome — no tests exist at all, the feature is flag-gated, or it demonstrably works
+ * where Bugzilla found nothing. Otherwise the numbers go on the detail lines, so the box
+ * line stays one line and carries the surprise rather than the corroboration.
+ */
+function jsFyiLines(h, name) {
+  const fyi = h && h.fyi;
+  if (!fyi) return { short: '', lines: [] };
+  if (!fyi.ok) {
+    return {
+      short: '',
+      lines: [`test262.fyi: ${fyi.error}`],
+    };
+  }
+  const r = fyi.results && fyi.results[name];
+  if (!r) {
+    return { short: '', lines: [`test262.fyi does not track this flag on ${fyi.engine}.`] };
+  }
+  // Always name the build, and always name it as a nightly. This is the one way this
+  // source misleads: reading "155.0a1 passes 78/78" as a statement about the release the
+  // notes are describing.
+  const where = `${fyi.engine} ${fyi.version} (NIGHTLY, not the release above)`;
+  if (r.noTests) {
+    return {
+      short: 'no test262 tests exist yet',
+      lines: [`test262.fyi: the flag is registered upstream with 0 tests written, so nothing`,
+        'anywhere can measure it. That is why a bug search may also come up empty.'],
+    };
+  }
+  const lines = [`test262.fyi: ${r.pass}/${r.total} pass on ${where}, default options`];
+  if (r.prefGated) {
+    lines.push(`  and ${r.expPass}/${r.total} with experimental options, so it is FLAG GATED even in`);
+    lines.push('  nightly. Not on by default.');
+    return { short: 'test262 needs experimental options', lines };
+  }
+  if (r.fullyPassing) {
+    lines.push('  All of them, without experimental options: it works and is on by default in');
+    lines.push('  nightly. Which release enabled it is the separate question Bugzilla answers.');
+  } else {
+    lines.push(`  Partial: ${r.total - r.pass} still fail, same in the experimental build.`);
+  }
+  return { short: '', lines };
+}
+
+/**
+ * What this comparison cannot show, for JavaScript — printed as a section of its own.
+ *
+ * It sits third, straight after the change breakdown, and before every ranked view.
+ * That placement is the point: it is not a footnote about data quality but a
+ * statement about what the numbers below are *capable* of containing. Three Iterator
+ * proposals shipped in one Firefox release with no test in either run, and every
+ * ranked section, the inventory, the vocabulary rollup and wpt-state.js were all
+ * correct to say nothing about them.
+ */
+function jsHorizonLines(h) {
+  const L = [];
+  const p = (s = '') => L.push(s);
+
+  p('## JavaScript coverage horizon (WPT vendors test262, it does not track it)');
+  if (!h) {
+    // An artifact collected before this check existed. Silence here would be read as
+    // "no gaps", which is the exact failure the section exists to prevent.
+    p('# NOT CHECKED — this artifact predates the check, so JS gaps are unknown, not');
+    p('# absent. Re-collect to measure them.');
+    p('');
+    return L;
+  }
+  if (!h.ok) {
+    p(`# NOT CHECKED — the horizon lookup failed: ${h.error}`);
+    p('# JS gaps are therefore UNKNOWN for this comparison, not absent. Check MDN\'s');
+    p('# release notes or Bugzilla for JavaScript features by hand before writing.');
+    p('');
+    return L;
+  }
+
+  const age = h.lagDays === null ? 'age unknown' : `${h.lagDays} days behind`;
+  p(`# tests/js in this WPT revision come from tc39/test262 @ ${h.after.rev.slice(0, 10)}`);
+  p(`#   snapshot ${h.after.date || '(date unknown)'}   upstream HEAD ${h.upstream.date || '(date unknown)'}   ${age}`);
+  if (!h.sameSnapshot) {
+    p(`#   the two runs are on DIFFERENT snapshots: ${h.before.rev.slice(0, 10)} -> ${h.after.rev.slice(0, 10)}`);
+  }
+  p('#');
+  p('# A JS feature whose test262 tests landed after that snapshot has NO test in');
+  p('# either run. It cannot appear in the inventory, in any ranked section, or in');
+  p('# wpt-state.js, and its absence looks exactly like not shipping. Firefox 154');
+  p('# shipped Iterator Chunking, Iterator Includes and Iterator Join into a 117-day-old');
+  p('# snapshot and the notes named none of them.');
+
+  if (h.missing.length) {
+    p('');
+    p(`# ${h.missing.length} feature flag(s) upstream has and this comparison does not. WPT cannot say`);
+    p('# whether the browser shipped these, only that it did not test them — so each is');
+    p('# resolved at collection time against two sources that answer different halves:');
+    p('# test262.fyi for "does it work, and is it on by default", and a per-vendor release');
+    p('# source for "which version turned it on".');
+    const sh = h.shipped;
+    if (h.fyi && h.fyi.ok) {
+      p('#');
+      p(`# test262.fyi runs all of test262 @ ${(h.fyi.test262Revision || '?').slice(0, 7)} against ${h.fyi.engine} ${h.fyi.version},`);
+      p('# twice: with and without experimental options. That measures whether each feature');
+      p('# WORKS and whether it is on by DEFAULT — but the build is a NIGHTLY, so it cannot');
+      p('# say which release enabled it.');
+    }
+    if (sh && sh.ok) {
+      p('#');
+      p(`# Release source: ${sh.source} (${sh.product} ${sh.version}).`);
+      if (sh.note) p(`# ${sh.note}`);
+      p('# Do NOT re-derive this by searching for a flag name. Both this source and Bugzilla');
+      p('# search over PROSE feature names, so the flag matches nothing even for features');
+      p('# that shipped:');
+      p('#   quicksearch=iterator-chunking        0 bugs   (shipped in Firefox 154)');
+      p('#   quicksearch=Iterator.prototype.join  0 bugs   (shipped in Firefox 154)');
+      if (sh.extra && sh.extra.length) {
+        p(`# ${sh.extra.length} bug(s) whose summary starts "Ship" are flagged fixed for ${sh.version}. That`);
+        p('# list needs no guess about wording, so it cannot produce a false negative:');
+        for (const b of sh.extra) p(`  bug ${b.id}  ${b.summary}`);
+      }
+    } else if (sh && sh.unsupported) {
+      p('#');
+      p(`# NO release source for ${sh.product}: ${sh.error}.`);
+      p('# So every box below is UNANSWERED for "which version", not answered "no". The');
+      p('# test262.fyi measurement still says whether it works and is on by default.');
+      for (const url of sh.lookAt || []) p(`#   check by hand: ${url}`);
+    }
+    p('');
+    for (const f of h.missing) {
+      const finding = jsFinding(h, f.name);
+      p(`  ${f.name}${finding ? `      ${finding.short}` : ''}`);
+      const bits = [f.label, f.section].filter(Boolean).join(' / ');
+      if (bits) p(`      ${bits}`);
+      if (f.url) p(`      ${f.url}`);
+      for (const line of (finding ? finding.lines : [])) p(`      ${line}`);
+    }
+    if (!sh) {
+      p('');
+      p('# No release check recorded. Each of the above is UNANSWERED — and searching a bug');
+      p('# tracker for the flag name will answer "no" incorrectly. Run:');
+      p('#   node scripts/wpt-js-gaps.js');
+    } else if (!sh.ok && !sh.unsupported) {
+      p('');
+      p(`# The release check did not run: ${sh.error}`);
+      p('# So the above are UNANSWERED, not answered "no".');
+    }
+  } else {
+    p('');
+    p('# No upstream feature flag is missing from this snapshot, so test262 coverage is');
+    p('# current. JS features can still be absent for want of tests being written.');
+  }
+
+  if (h.revendored && h.revendored.length) {
+    p('');
+    p(`# ${h.revendored.length} flag(s) arrived BETWEEN the two runs (test262 was re-vendored). Their`);
+    p('# tests exist on one side only, so they classify as `added` and the worksheet');
+    p('# pre-resolves them as test-suite churn — true about the mechanism, and wrong');
+    p('# about the consequence: a whole proposal\'s tests arriving is a lead, and this');
+    p('# is the same shape as the /third_party exclusion that once hid Intl.Locale.');
+    for (const f of h.revendored) {
+      p(`  ${f.name}${f.label ? `      ${f.label}` : ''}`);
+    }
+  }
+  p('');
+  return L;
+}
+
+/**
+ * The two or three lines that stop the inventory reading as a completeness guarantee
+ * for JavaScript. Short by design — it appears above every page of every listing.
+ */
+function jsHorizonCaveat(h) {
+  if (!h) {
+    return ['This artifact predates the test262 horizon check, so JS coverage gaps are',
+      'UNKNOWN here rather than absent. Re-collect to measure them.'];
+  }
+  if (!h.ok) {
+    return ['The test262 horizon check failed at collection time, so JS coverage gaps are',
+      'UNKNOWN here rather than absent — check MDN or Bugzilla for JS features by hand.'];
+  }
+  if (!h.missing.length && !(h.revendored || []).length) return [];
+  const lag = h.lagDays === null ? 'of unknown age' : `${h.lagDays} days behind upstream`;
+  return [
+    `BUT test262 is VENDORED into WPT — this snapshot is ${lag},`,
+    `so reading every line below still cannot surface ${h.missing.length} JS feature(s) that have`,
+    'no test in either run. Those are boxed at the end of checklist.md, and listed by',
+    'wpt-report.js --section javascript.',
+  ];
+}
+
+// ---------------------------------------------------------------------------
 // report.txt — the ranked view, plus the two sections that ranking would hide
 // ---------------------------------------------------------------------------
 
@@ -164,6 +503,8 @@ function renderReport(report, { top = 40 } = {}) {
   }
   p(`${'(unchanged)'.padEnd(18)} ${report.buckets.unchanged || 0}`);
   p('');
+
+  for (const line of jsHorizonLines(report.jsHorizon)) p(line);
 
   // A test with no subtests cannot be ranked by subtest delta, so it must not share a
   // section with tests that can. That is already why reftests have their own two
@@ -394,6 +735,11 @@ function renderInventory(report, tests, {
   p('JS/Intl features live in third_party/test262, not a web-platform directory.');
   p('"+" / "-" lines are the subtest names that changed state: that is the feature');
   p('vocabulary, so read those rather than inferring anything from the filename.');
+  // The line above used to end the paragraph, and read as an assurance that looking
+  // in third_party/test262 was sufficient. It is not: WPT vendors test262 on a slow
+  // cadence, so reading this listing to the last line still cannot surface a JS
+  // feature whose tests postdate the snapshot. Three did on one real comparison.
+  for (const line of jsHorizonCaveat(report.jsHorizon)) p(line);
   if (!dirsOnly && navHint) {
     p('');
     p(`This is ${groups.length} directories and ${tests.length} files. Navigate it with the flags below,`);
@@ -510,8 +856,12 @@ function renderChecklist(report, tests, { dir = '' } = {}) {
 
   p(`# Coverage checklist: ${report.before.spec} -> ${report.after.spec}`);
   p('');
+  const jsGaps = jsGapBoxes(report.jsHorizon);
   p(`${needsVerdict.length} directories need a verdict. ${churnOnly.length} are pre-resolved`);
   p('as test-suite churn (added/removed tests only — different WPT revisions).');
+  if (jsGaps.length) {
+    p(`${jsGaps.length} JavaScript feature(s) have no test here at all and are boxed at the end.`);
+  }
   p('');
   p('Work top to bottom. Replace EVERY box with an x and append " — <verdict>",');
   p('where the verdict is one of:');
@@ -643,7 +993,129 @@ function renderChecklist(report, tests, { dir = '' } = {}) {
       }
     }
   }
+
+  for (const line of jsChecklistLines(report.jsHorizon)) p(line);
   return L;
+}
+
+/**
+ * The worksheet's third list: JavaScript features with no test on either side.
+ *
+ * Separate from renderChecklist so wpt-js-gaps.js can append exactly this to an
+ * artifact collected before the check existed, rather than an approximation of it.
+ *
+ * Last of the three lists because it is smallest, not least: on the comparison that
+ * produced it, three of its five boxes were features the notes should have led with.
+ */
+function jsChecklistLines(h) {
+  const jsGaps = jsGapBoxes(h);
+  if (!jsGaps.length) return [];
+  const L = [];
+  const p = (s = '') => L.push(s);
+  p('');
+  p(`## JavaScript features with no test here (${jsGaps.length})`);
+  p('');
+  p('WPT vendors test262 rather than tracking it. This comparison\'s snapshot is');
+  p(`tc39/test262 @ ${h.after.rev.slice(0, 10)}${h.lagDays === null ? '' : `, ${h.lagDays} days behind upstream`}, so every flag below is one`);
+  p('upstream declares and this snapshot does not — a PROOF that neither run holds a');
+  p('single test for it, not a guess. So the diff, the inventory, the ranked report');
+  p('and wpt-state.js are all silent about these, and that silence looks exactly like');
+  p('the feature not shipping.');
+  p('');
+  p('Firefox 154 shipped Iterator Chunking, Iterator Includes and Iterator Join into');
+  p('a 117-day-old snapshot. All three were invisible and all three were missed.');
+  p('');
+  // The Bugzilla answer, printed here rather than left as an exercise. The previous
+  // version of this section said "look the flag up in Bugzilla", and that produced a
+  // worse outcome than silence: `quicksearch=iterator-chunking` returns zero bugs, so
+  // all three shipped Iterator proposals were found, checked, and ruled out.
+  const sh = h.shipped;
+  if (h.fyi && h.fyi.ok) {
+    p(`Each box carries a test262.fyi measurement: ${h.fyi.engine} ${h.fyi.version}, run with and`);
+    p('without experimental options, so it says whether the feature works AND whether it is');
+    p('on by default. That build is a NIGHTLY, so it does not say which release enabled it.');
+    p('');
+  }
+  if (sh && sh.ok) {
+    p(`Each box also carries ${sh.source}'s answer for ${sh.product} ${sh.version}, so do not`);
+    p('re-derive it. Searching a bug tracker for a test262 flag name does not work — every');
+    p('one of these returns zero bugs, including the ones that shipped:');
+    p('');
+    p('  quicksearch=iterator-chunking        0 bugs   (shipped in Firefox 154)');
+    p('  quicksearch=Iterator.prototype.join  0 bugs   (shipped in Firefox 154)');
+    p('');
+    if (sh.extra && sh.extra.length) {
+      p(`Vendors write prose. ${sh.extra.length} bug(s) whose summary starts "Ship" are flagged fixed for`);
+      p(`${sh.version}, and that list needs no guess about wording:`);
+      p('');
+      for (const b of sh.extra) p(`  bug ${b.id}  ${b.summary}`);
+      p('');
+      p('A box saying NOT FOUND means the per-flag wording missed, NOT that the feature did');
+      p('not ship. Check it against that list by eye before answering.');
+    } else {
+      p('A box saying NOT FOUND means the per-flag wording missed, NOT that the feature did');
+      p('not ship. Weigh the test262.fyi measurement before answering.');
+    }
+  } else if (sh && sh.unsupported) {
+    // Named as a known limit rather than left as a shrug. Safari lands here: WebKit's
+    // Bugzilla has no per-release status field, and pointing the Firefox logic at it
+    // produces confident nonsense — "Iterator chunking" returns a 2015 Web Inspector bug.
+    p(`There is NO release-attribution source wired up for ${sh.product}:`);
+    p(`  ${sh.error}.`);
+    p('So "which version turned it on" is UNANSWERED for every box below — not "no". The');
+    p('test262.fyi measurement above still tells you whether it works and is on by default');
+    p('in the tested build. For the version, check by hand:');
+    for (const url of sh.lookAt || []) p(`  ${url}`);
+  } else {
+    p('These are the only boxes here that cannot be answered from the artifact, and the');
+    p('automatic release check did not run, so each needs a lookup. Do NOT search for the');
+    p('flag name: `quicksearch=iterator-chunking` returns zero bugs for a feature that');
+    p('shipped in Firefox 154. Search the feature as prose ("Iterator Chunking"), or run:');
+    p('  node scripts/wpt-js-gaps.js');
+  }
+  p('');
+  p('Then answer in one of these shapes (indented, so they are examples, not boxes — and');
+  p('note that one flag names a whole PROPOSAL, so one box can cover several methods):');
+  p('  written up: Iterator.prototype.chunks() and .windows(), per bug 2047997');
+  p('  not a feature: implemented but preffed off in this release, bug 2045859');
+  p('  not a feature: test262 harness plumbing, not a language feature');
+  p('');
+  for (const box of jsGaps) {
+    const finding = jsFinding(h, box.feature.name);
+    p(`[ ] ${box.path}   (no test here${finding ? `; ${finding.short}` : ''})`);
+    const bits = [box.feature.label, box.feature.section].filter(Boolean).join(' / ');
+    if (bits) p(`      ${bits}`);
+    if (box.feature.url) p(`      ${box.feature.url}`);
+    for (const line of (finding ? finding.lines : [])) p(`      ${line}`);
+  }
+  return L;
+}
+
+/**
+ * One box per JavaScript feature this comparison cannot see.
+ *
+ * A box rather than a printed caveat, for the reason the whole worksheet exists: the
+ * Popover API rework was missed while the strongest signal the tooling emits was on
+ * screen, because a printed line is state nobody keeps. A gap that no view can
+ * confirm needs that discipline more than anything else here, not less — and unlike
+ * every other box, the reader has to leave the artifact to answer it.
+ *
+ * `revendored` flags are boxed too. Their tests exist in the after run only, so they
+ * land in the `added` bucket, which the directory worksheet pre-resolves as churn —
+ * so without a box of their own they are the one class of gap that arrives already
+ * ticked.
+ */
+function jsGapBoxes(h) {
+  if (!h || !h.ok) return [];
+  const boxes = [];
+  const seen = new Set();
+  for (const feature of [...h.missing, ...(h.revendored || [])]) {
+    const path = jsBoxPath(feature.name);
+    if (seen.has(path)) continue;
+    seen.add(path);
+    boxes.push({ path, feature });
+  }
+  return boxes;
 }
 
 /** Every box line's path, in file order. One parser, used on both sides of --verify. */
@@ -795,13 +1267,30 @@ function verifyChecklist(text, expected = null) {
       bad.push({ line: b.line, why: 'ticked, but carries no verdict at all' });
       continue;
     }
-    if (NON_ANSWER.test(b.verdict)) {
-      bad.push({ line: b.line, why: 'the verdict defers instead of answering' });
+    // Name the trigger, always. A gate that says only "this is wrong" teaches avoidance
+    // rather than precision: one pass spent three round-trips rewording a single verdict,
+    // guessing at which word had tripped the check, and never found out. The rejected
+    // phrase is the one piece of information the reader cannot reconstruct.
+    const defers = b.verdict.match(NON_ANSWER);
+    if (defers) {
+      bad.push({
+        line: b.line,
+        why: `the verdict defers instead of answering — the phrase "${defers[0]}" is what `
+          + 'triggered this; say what the feature is, or why it is not one',
+      });
       continue;
     }
     const kind = b.verdict.match(VERDICT_KIND);
     if (!kind) {
-      bad.push({ line: b.line, why: 'verdict names no kind (written up / explained / not a feature)' });
+      // The set is closed, and `regression:` is the natural thing to reach for — one pass
+      // wrote it four times. A regression that goes in the notes IS "written up".
+      const first = (b.verdict.match(/^\s*([a-z][a-z -]{0,20}?):/i) || [])[1];
+      bad.push({
+        line: b.line,
+        why: (first ? `"${first}:" is not one of the three kinds. ` : 'verdict names no kind. ')
+          + 'Use exactly one of "written up:", "explained:" or "not a feature:" — a bug or a '
+          + 'regression you are reporting is "written up:"',
+      });
       continue;
     }
     // A bare kind with no detail is the same non-answer in fewer words.
@@ -1178,5 +1667,6 @@ module.exports = {
   renderReport, renderInventory, renderChecklist, renderFile, renderFileLines,
   renderFiles, verifyChecklist, boxPaths, verdictOf, grepFragment, collapseVariants,
   groupByDir, evidenceLines, opaquelyNamed, positionalName, positionalSubtests,
-  messageNamesSomething, CATEGORIES,
+  messageNamesSomething, CATEGORIES, jsBoxPath, jsGapBoxes, jsHorizonLines,
+  jsChecklistLines, jsFinding, jsFyiLines, jsUpstreamLines,
 };

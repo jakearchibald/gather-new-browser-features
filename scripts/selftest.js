@@ -530,6 +530,26 @@ function checklistChecks() {
     return r.bad.length === 0 ? null : `flagged a good verdict: ${whys(r)}`;
   });
 
+  // A gate whose rejections are not diagnosable teaches avoidance, not precision. One pass
+  // spent three round-trips rewording a single verdict, guessing at which word had tripped
+  // the check, and never found out which it was.
+  check('gate: a rejection names the phrase that triggered it', () => {
+    const r = verifyChecklist(sheet('[x] /a  — explained: same as /b, various other bits'));
+    if (r.bad.length !== 1) return `expected 1 bad, got ${r.bad.length}`;
+    return /"various"/.test(r.bad[0].why)
+      ? null : `did not name the trigger: ${r.bad[0].why}`;
+  });
+
+  check('gate: a wrong verdict kind is named, and the closed set is listed', () => {
+    // `regression:` is the natural fourth kind to reach for — one pass wrote it four times.
+    const r = verifyChecklist(sheet('[x] /a  — regression: cookieStore.set returned deleted'));
+    if (r.bad.length !== 1) return `expected 1 bad, got ${r.bad.length}`;
+    const why = r.bad[0].why;
+    if (!/"regression:"/.test(why)) return `did not quote the offending prefix: ${why}`;
+    return /written up:/.test(why) && /not a feature:/.test(why)
+      ? null : `did not list the valid kinds: ${why}`;
+  });
+
   check('gate: a churn directory needs no verdict', () => {
     const r = verifyChecklist('[x] /some/dir  (3f, churn)');
     return r.bad.length === 0 ? null : `churn line flagged: ${whys(r)}`;
@@ -624,6 +644,513 @@ function checklistChecks() {
 }
 
 // ---------------------------------------------------------------------------
+// The JavaScript coverage horizon — the miss that reading harder cannot fix
+// ---------------------------------------------------------------------------
+// Firefox 154 shipped three TC39 Iterator proposals. The 153->154 notes named none
+// of them, and unlike every other entry in this file that was not a reading failure:
+// WPT vendors test262 rather than tracking it, the snapshot was 117 days stale, and
+// `test/built-ins/Iterator/prototype/` therefore held drop/every/filter/... and no
+// chunks, windows, includes or join. Zero tests, both runs. `wpt-grep.js Iterator`
+// matched nothing in all three of its layers; `wpt-state.js`, which exists precisely
+// so "not in the diff" is never reported as "not shipped", answers from the same two
+// summaries and so could not help either.
+//
+// The fixtures are trimmed real features.txt content, and the vendored fixture is what
+// wpt @ 3159769338 actually pinned. Offline, so this runs with no artifact.
+async function horizonChecks() {
+  const {
+    parseVendoredRev, parseFeatures, newFeatures,
+  } = require(path.join(SCRIPTS, 'lib', 'test262.js'));
+  const {
+    jsGapBoxes, jsChecklistLines, boxPaths, verifyChecklist, jsFinding, jsFyiLines,
+    jsUpstreamLines,
+  } = require(path.join(SCRIPTS, 'lib', 'render.js'));
+  // Both renderers read a block off the horizon, so wrap a bare block for the checks that
+  // only care about one finding's wording.
+  // jsFinding reads the horizon's normalised `shipped` block (lib/shipped.js), so wrap a
+  // bare one for the checks that only care about how a single outcome is worded.
+  const shippedBlock = (outcome, extra = {}) => ({
+    ok: true, product: 'firefox', source: 'Bugzilla', version: 154, extra: [],
+    findings: [{ feature: { name: 'flag' }, title: 'T', outcome, evidence: [], ...extra }],
+  });
+  const jsFindingText = (block, name) => jsFinding({ shipped: block }, name) || { short: '', lines: [] };
+  const jsFyiText = (fyiBlock, name) => jsFyiLines({ fyi: fyiBlock }, name);
+
+  // Trimmed from tc39/test262@b66872a92 — the revision wpt @ 3159769338 vendored.
+  const VENDORED = `## Proposed language features
+#
+# blurb
+
+# Decorators
+# https://github.com/tc39/proposal-decorators
+decorators
+
+# Temporal
+# https://github.com/tc39/proposal-temporal
+Temporal
+
+# Explicit Resource Management
+# https://github.com/tc39/proposal-explicit-resource-management
+explicit-resource-management
+
+## Standard language features
+#
+# blurb
+
+Array.prototype.at
+iterator-helpers
+`;
+
+  // ...and from main, four months later. Temporal and explicit-resource-management
+  // GRADUATED: same names, different half of the file.
+  const UPSTREAM = `## Proposed language features
+#
+# blurb
+
+# Decorators
+# https://github.com/tc39/proposal-decorators
+decorators
+
+# Source Phase Imports
+## https://github.com/tc39/proposal-source-phase-imports
+source-phase-imports
+## test262 special specifier
+source-phase-imports-module-source
+
+# Iterator Join
+# https://github.com/tc39/proposal-iterator-join
+Iterator.prototype.join
+
+## Standard language features
+#
+# blurb
+
+Array.prototype.at
+explicit-resource-management
+iterator-chunking
+iterator-helpers
+iterator-includes
+Temporal
+`;
+
+  check('horizon: the vendored test262 revision is read from vendored.toml', () => {
+    const got = parseVendoredRev(
+      '[test262]\nsource = "https://github.com/tc39/test262"\nrev = "b66872a92487694396fb082343e08dd7cca5ddf4"\n',
+    );
+    return got === 'b66872a92487694396fb082343e08dd7cca5ddf4' ? null : `got ${JSON.stringify(got)}`;
+  });
+
+  check('horizon: the three shipped Iterator proposals are reported as gaps', () => {
+    const missing = newFeatures(parseFeatures(VENDORED), parseFeatures(UPSTREAM))
+      .map((f) => f.name);
+    const want = ['Iterator.prototype.join', 'iterator-chunking', 'iterator-includes'];
+    const absent = want.filter((w) => !missing.includes(w));
+    return absent.length ? `did NOT report ${absent.join(', ')} (got ${missing.join(', ')})` : null;
+  });
+
+  check('horizon: a feature that merely graduated is NOT reported as new', () => {
+    // The reason this is a parser and not `diff features.txt`. A flag moves from the
+    // proposals half to the alphabetical half when it reaches the published spec, so a
+    // line diff calls Temporal and explicit-resource-management both removed AND added
+    // — two features that did nothing, in a list whose whole value is that every entry
+    // is worth a lookup. Four of the five real entries would have been noise.
+    const missing = newFeatures(parseFeatures(VENDORED), parseFeatures(UPSTREAM))
+      .map((f) => f.name);
+    const graduated = ['Temporal', 'explicit-resource-management'].filter((g) => missing.includes(g));
+    return graduated.length ? `reported ${graduated.join(', ')} as a new gap` : null;
+  });
+
+  check('horizon: `##` inside a proposal comment block is not a section heading', () => {
+    // Upstream really does have `## https://...` and `## test262 special specifier`
+    // inside the Source Phase Imports block. Treating those as headings filed every
+    // later flag under a section named after a URL, and reported
+    // Iterator.prototype.join as a "test262 special specifier".
+    const f = parseFeatures(UPSTREAM);
+    const join = f.get('Iterator.prototype.join');
+    if (!join) return 'Iterator.prototype.join was not parsed at all';
+    if (join.section !== 'Proposed language features') return `section is ${JSON.stringify(join.section)}`;
+    return f.get('iterator-chunking').section === 'Standard language features'
+      ? null : 'the standard-features section was mis-attributed';
+  });
+
+  check('horizon: a proposal keeps its name and URL, which is the release-note vocabulary', () => {
+    const join = parseFeatures(UPSTREAM).get('Iterator.prototype.join');
+    return join.label === 'Iterator Join' && /proposal-iterator-join/.test(join.url || '')
+      ? null : `label=${JSON.stringify(join.label)} url=${JSON.stringify(join.url)}`;
+  });
+
+  check('horizon: each gap becomes a box the gate refuses to pass', () => {
+    // A printed caveat is state nobody keeps — that is why the worksheet exists at
+    // all. A gap no view can confirm needs the completion criterion more than
+    // anything else here, since answering it means leaving the artifact.
+    const h = {
+      ok: true,
+      after: { rev: 'b66872a92487694396fb082343e08dd7cca5ddf4' },
+      lagDays: 117,
+      missing: newFeatures(parseFeatures(VENDORED), parseFeatures(UPSTREAM)),
+      revendored: [],
+    };
+    const boxes = jsGapBoxes(h);
+    if (!boxes.length) return 'no boxes generated for a snapshot with known gaps';
+    const text = jsChecklistLines(h).join('\n');
+    const paths = boxPaths(text);
+    for (const b of boxes) {
+      if (!paths.includes(b.path)) return `${b.path} is not a parseable box in the rendered section`;
+    }
+    const r = verifyChecklist(text, paths);
+    return r.open.length === boxes.length
+      ? null
+      : `gate saw ${r.open.length} open boxes, expected ${boxes.length}`;
+  });
+
+  check('horizon: a box path needs no shell quoting', () => {
+    // These get pasted as wpt-resolve.js keys and printed in --verify's output. A
+    // metacharacter in one turns a documented command into a permission prompt, which
+    // is the failure mode the whole no-quotes rule exists for.
+    const h = {
+      ok: true,
+      after: { rev: 'x' },
+      lagDays: 1,
+      missing: newFeatures(parseFeatures(VENDORED), parseFeatures(UPSTREAM)),
+      revendored: [],
+    };
+    const bad = jsGapBoxes(h).map((b) => b.path).filter((p) => /[?()|[\]$;<>*'"\s&\\]/.test(p));
+    return bad.length ? `needs quoting: ${bad.join(', ')}` : null;
+  });
+
+  // -------------------------------------------------------------------------
+  // …and the follow-up miss: the gap was found, then ruled out
+  // -------------------------------------------------------------------------
+  // The first fix surfaced all three Iterator proposals as boxes and told the reader to
+  // "look the flag up in the browser's release notes or Bugzilla". That is a worse
+  // outcome than silence, and it happened: "I checked all five against Bugzilla rather
+  // than taking that at face value, and none of them shipped."
+  //
+  // Because a test262 flag name is not Bugzilla's vocabulary. Verbatim, today:
+  //   quicksearch=iterator-chunking        -> {"bugs":[]}
+  //   quicksearch=Iterator.prototype.join  -> {"bugs":[]}
+  // Zero bugs for two features that shipped in 154. So the lookup is done by the tooling,
+  // in Bugzilla's own wording, and its answer is rendered onto the box.
+  const bz = require(path.join(SCRIPTS, 'lib', 'bugzilla.js'));
+  // The vendor-neutral helpers (majorVersion, searchTitleFor) live in the dispatcher, not
+  // in the Firefox adapter — both adapters need them.
+  const shipped = require(path.join(SCRIPTS, 'lib', 'shipped.js'));
+
+  check('bugzilla: a flag name is turned into the prose Mozilla writes', () => {
+    const cases = [
+      // The two that returned zero bugs. Mozilla's summaries are "Ship Iterator Chunking
+      // proposal" and "Ship Iterator Includes proposal".
+      [{ name: 'iterator-chunking' }, 'Iterator chunking'],
+      [{ name: 'iterator-includes' }, 'Iterator includes'],
+      // features.txt already carries the proposal name for anything not yet graduated,
+      // and it beats anything derivable from the flag.
+      [{ name: 'Iterator.prototype.join', label: 'Iterator Join' }, 'Iterator Join'],
+      // No label: the dotted form loses `prototype`, which appears in no bug summary.
+      [{ name: 'Iterator.prototype.join' }, 'Iterator join'],
+      [{ name: 'Atomics.pause' }, 'Atomics pause'],
+    ];
+    for (const [feature, want] of cases) {
+      const got = shipped.searchTitleFor(feature);
+      if (got !== want) return `${feature.name} -> "${got}", expected "${want}"`;
+    }
+    return null;
+  });
+
+  check('bugzilla: "no bug found" is UNKNOWN, never "did not ship"', () => {
+    // The whole failure in one assertion. An empty result set must not be reportable as
+    // a negative finding, because the empty result is what the wrong query returns.
+    const f = bz.classify([], [], 154);
+    if (f.outcome !== 'no-bug-found') return `outcome was ${f.outcome}`;
+    const rendered = jsFindingText(shippedBlock('unknown'), 'flag');
+    if (/did not ship|didn't ship|not shipped/i.test(rendered.short)) {
+      return `the short form asserts a negative: "${rendered.short}"`;
+    }
+    return /UNKNOWN/.test(rendered.short) && /NOT a "no"/i.test(rendered.lines.join(' '))
+      ? null : `did not say it was unknown: "${rendered.short}"`;
+  });
+
+  check('bugzilla: implemented behind a pref is not reported as shipped', () => {
+    // A proposal has three bugs and two are the wrong answer:
+    //   [meta] Iterator includes proposal          never resolved
+    //   Implement iterator includes proposal       FIXED, 152 Branch
+    //   Ship Iterator Includes proposal            FIXED, 154 Branch
+    // Reading the first FIXED bug gives "shipped in 152", wrong in both directions.
+    const bugs = [
+      { id: 1, summary: '[meta] Iterator includes proposal', resolution: '', target_milestone: '---' },
+      { id: 2, summary: 'Implement iterator includes proposal', resolution: 'FIXED', target_milestone: '152 Branch', cf_status_firefox154: '---' },
+    ];
+    const f = bz.classify(bugs, [], 154);
+    if (f.outcome !== 'implemented-not-shipped') return `outcome was ${f.outcome}`;
+    // And it must cite the landing bug, not whatever FIXED bug came back first.
+    return f.bug.id === 2 ? null : `cited bug ${f.bug.id} instead of the Implement bug`;
+  });
+
+  check('bugzilla: the Ship bug for THIS release is what means shipped', () => {
+    const bugs = [
+      { id: 2, summary: 'Implement iterator includes proposal', resolution: 'FIXED', target_milestone: '152 Branch', cf_status_firefox154: '---' },
+      { id: 3, summary: 'Ship Iterator Includes proposal', resolution: 'FIXED', target_milestone: '154 Branch', cf_status_firefox154: 'fixed' },
+    ];
+    const f = bz.classify(bugs, [], 154);
+    return f.outcome === 'shipped' && f.bug.id === 3 ? null : `outcome ${f.outcome}, bug ${f.bug && f.bug.id}`;
+  });
+
+  check('bugzilla: a Ship bug fixed for a DIFFERENT release is not this release', () => {
+    const bugs = [
+      { id: 3, summary: 'Ship Iterator Includes proposal', resolution: 'FIXED', target_milestone: '152 Branch', cf_status_firefox154: '---' },
+    ];
+    return bz.classify(bugs, [], 154).outcome === 'shipped-elsewhere'
+      ? null : 'a ship bug from another release counted as shipping here';
+  });
+
+  check('bugzilla: the version comes from the browser version, not the spec label', () => {
+    const cases = [['154.0b10', 154], ['155.0a1', 155], ['153.0.4', 153], ['', null]];
+    for (const [input, want] of cases) {
+      const got = shipped.majorVersion(input);
+      if (got !== want) return `${JSON.stringify(input)} -> ${got}, expected ${want}`;
+    }
+    return null;
+  });
+
+  // The finding is rendered ONTO the box line, which puts generated text where the gate
+  // parses the reader's verdict. Two characters and one word list would break it, so this
+  // sweeps every outcome rather than trusting the current wording.
+  check('bugzilla: no rendered finding can corrupt a verdict on its own box', () => {
+    const { verifyChecklist, verdictOf } = require(path.join(SCRIPTS, 'lib', 'render.js'));
+    const outcomes = ['shipped', 'shipped-earlier', 'shipped-other-version', 'gated',
+      'changed-not-shipped', 'not-shipped', 'unknown', 'error'];
+    for (const label of outcomes) {
+      const { short } = jsFindingText(shippedBlock(label), 'flag');
+      const box = `[x] test262-feature:flag   (no test here; ${short})  — written up: the feature`;
+      // The generated text must not look like the start of the verdict...
+      const got = verdictOf(box);
+      if (got !== 'written up: the feature') return `${label}: verdict parsed as "${got}"`;
+      // ...and must not trip the gate's non-answer or missing-kind rules.
+      const r = verifyChecklist(box);
+      if (r.bad.length) return `${label}: gate rejected a good verdict — ${r.bad[0].why}`;
+    }
+    return null;
+  });
+
+  // -------------------------------------------------------------------------
+  // test262.fyi — evidence, where Bugzilla only has status
+  // -------------------------------------------------------------------------
+  // Bugzilla answers "which release turned this on" from a status field. test262.fyi
+  // actually runs test262 against engine builds, twice per engine (with and without
+  // experimental options), so it answers "does it work" and "is it on by default" — the
+  // pref question the skill otherwise has to state and leave open. It cannot replace
+  // Bugzilla, because it tests NIGHTLY (`sm: 155.0a1` while the notes are about 154 beta)
+  // and publishes no per-feature history.
+  const fyi = require(path.join(SCRIPTS, 'lib', 'test262fyi.js'));
+  const META = {
+    engines: { sm: '155.0a1', sm_exp: '155.0a1', v8: '15.3.60', v8_exp: '15.3.60' },
+    test262: { revision: '3655e74' },
+    features: {
+      'iterator-chunking': { total: 78, engines: { sm: 78, sm_exp: 78, v8: 9 } },
+      'export-defer': { total: 0, engines: { sm: 0, sm_exp: 0, v8: 0 } },
+      'error-stack-accessor': { total: 35, engines: { sm: 18, sm_exp: 18, v8: 0 } },
+      'flag-gated-example': { total: 20, engines: { sm: 0, sm_exp: 20, v8: 0 } },
+    },
+  };
+  const sm = fyi.engineFor('firefox');
+
+  check('test262.fyi: a browser maps to its engine, both configurations', () => {
+    if (!sm || sm.key !== 'sm' || sm.exp !== 'sm_exp') return `firefox -> ${JSON.stringify(sm)}`;
+    if (fyi.engineFor('chrome').key !== 'v8') return 'chrome does not map to v8';
+    return fyi.engineFor('ladybird') === null ? null : 'an unknown product got an engine';
+  });
+
+  check('test262.fyi: passing without experimental options is on by default', () => {
+    const r = fyi.featureResult(META, 'iterator-chunking', sm);
+    return r.fullyPassing && !r.prefGated && r.pass === 78 && !r.noTests
+      ? null : `iterator-chunking -> ${JSON.stringify(r)}`;
+  });
+
+  check('test262.fyi: passing only with experimental options is FLAG GATED', () => {
+    // The distinction the skill otherwise cannot make. Reporting this as "works" would
+    // put a preffed-off feature in the notes as available.
+    const r = fyi.featureResult(META, 'flag-gated-example', sm);
+    return r.prefGated && !r.fullyPassing ? null : `not detected as gated: ${JSON.stringify(r)}`;
+  });
+
+  check('test262.fyi: zero tests upstream is distinct from failing them', () => {
+    // `export-defer` is registered upstream with nothing behind it, which is why the
+    // Bugzilla search also came up empty. "Nothing to measure" and "measured as broken"
+    // must not render the same.
+    const r = fyi.featureResult(META, 'export-defer', sm);
+    if (!r.noTests) return 'total 0 was not reported as "no tests"';
+    if (r.fullyPassing) return '0/0 was reported as fully passing';
+    const { short, lines } = jsFyiText({ ok: true, engine: 'SpiderMonkey', version: '155.0a1', results: { 'export-defer': r } }, 'export-defer');
+    return /no test262 tests exist/i.test(short) && /0 tests written/.test(lines.join(' '))
+      ? null : `rendered as "${short}"`;
+  });
+
+  check('test262.fyi: the tested build is always labelled a nightly', () => {
+    // The one way this source misleads: reading "155.0a1 passes 78/78" as a statement
+    // about the release being written up.
+    const r = fyi.featureResult(META, 'iterator-chunking', sm);
+    const { lines } = jsFyiText({ ok: true, engine: 'SpiderMonkey', version: '155.0a1', results: { 'iterator-chunking': r } }, 'iterator-chunking');
+    const text = lines.join(' ');
+    return /NIGHTLY/.test(text) && /155\.0a1/.test(text)
+      ? null : `no nightly label in: ${text}`;
+  });
+
+  // -------------------------------------------------------------------------
+  // …and the third layer: whose bug tracker?
+  // -------------------------------------------------------------------------
+  // The gap is not Firefox-specific — `--from chrome@stable --to chrome@beta` has the same
+  // hole — so resolving it out of Bugzilla unconditionally is right for one vendor and
+  // wrong for the rest. Chrome has a better-shaped source (chromestatus: one call gives
+  // both the pref status and the milestone). Safari has none: bugs.webkit.org IS a
+  // Bugzilla, its REST API works, and pointing the Firefox logic at it produces confident
+  // nonsense — it has no per-release status field, and quicksearch "Iterator chunking"
+  // returns a 2015 Web Inspector bug about array indices.
+  const cs = require(path.join(SCRIPTS, 'lib', 'chromestatus.js'));
+
+  check('shipped: every vendor is either wired up or named as unsupported', () => {
+    for (const product of ['firefox', 'chrome', 'safari']) {
+      const s = shipped.sourceFor(product);
+      if (!s) return `${product} has no entry at all, so it would look like a glitch`;
+      if (s.kind === 'unsupported' && !(s.why && (s.lookAt || []).length)) {
+        return `${product} is unsupported without a reason and somewhere else to look`;
+      }
+    }
+    return shipped.sourceFor('ladybird') === null ? null : 'an unknown product got a source';
+  });
+
+  check('shipped: an unsupported vendor is UNKNOWN, never a negative', () => {
+    // Safari must not be answerable. The gate should still demand a verdict, and the
+    // reader must be sent somewhere real rather than told "not applicable".
+    for (const o of ['unknown', 'unsupported', 'error']) {
+      if (shipped.isNegative(o)) return `"${o}" was treated as a negative outcome`;
+    }
+    if (!shipped.isNegative('gated')) return '"gated" should be a negative for this release';
+    return shipped.isNegative('shipped') ? '"shipped" was treated as a negative' : null;
+  });
+
+  await checkAsync('shipped: Safari resolves to a named gap with places to look', async () => {
+    const r = await shipped.whatShipped([{ name: 'iterator-chunking' }], 'safari', '26.0');
+    if (r.ok) return 'Safari claimed to have a release source';
+    if (!r.unsupported) return 'Safari looked like a transient failure, not a known limit';
+    if (!/per-release status field/.test(r.error)) return `unhelpful reason: ${r.error}`;
+    return (r.lookAt || []).some((u) => /developer\.apple\.com/.test(u))
+      ? null : 'no Safari release notes URL offered';
+  });
+
+  check('chromestatus: "Enabled by default" plus a milestone is the answer', () => {
+    const entry = (text, ms) => ([{
+      id: 1, name: 'Iterator helpers', category: 'JavaScript',
+      browsers: { chrome: { status: { text, milestone_str: ms } } },
+    }]);
+    const cases = [
+      [entry('Enabled by default', '122'), 122, 'shipped'],
+      [entry('Enabled by default', '122'), 130, 'shipped-earlier'],
+      [entry('Enabled by default', '140'), 130, 'shipped-later'],
+      [entry('Behind a flag', 'Behind a flag'), 130, 'gated'],
+      [entry('Proposed', 'Proposed'), 130, 'not-shipped'],
+      // Unrecognised status text must NOT become a negative.
+      [entry('Some new status nobody has seen', ''), 130, 'unknown'],
+      [[], 130, 'unknown'],
+    ];
+    for (const [features, version, want] of cases) {
+      const got = cs.classify(features, version).outcome;
+      if (got !== want) {
+        const t = features.length ? features[0].browsers.chrome.status.text : '(no results)';
+        return `"${t}" @ ${version} -> ${got}, expected ${want}`;
+      }
+    }
+    return null;
+  });
+
+  check('chromestatus: the chromestatus entry does not clobber the test262 flag', () => {
+    // A real bug, and a silent one: classify() returned the chromestatus entry as
+    // `feature`, verifyFeatures spread it over its own `feature` (the test262 flag), and
+    // the renderer matches boxes on `feature.name` — so every Chrome finding was
+    // unmatchable and no box ever showed an answer.
+    const r = cs.classify([{
+      id: 1, name: 'Iterator Chunking', category: 'JavaScript',
+      browsers: { chrome: { status: { text: 'Proposed', milestone_str: 'Proposed' } } },
+    }], 130);
+    if ('feature' in r) return 'classify() still returns a `feature` key, which collides';
+    const merged = { feature: { name: 'iterator-chunking' }, title: 'Iterator Chunking', ...r };
+    return merged.feature.name === 'iterator-chunking'
+      ? null : `the flag became ${JSON.stringify(merged.feature)}`;
+  });
+
+  check('shipped: a Chrome milestone is read from a Chrome version string', () => {
+    // Chrome versions are "141.0.7390.54", Firefox "154.0b10", Safari "26.0". One parser.
+    const cases = [['141.0.7390.54', 141], ['154.0b10', 154], ['26.0', 26], ['18.4', 18]];
+    for (const [input, want] of cases) {
+      const got = shipped.majorVersion(input);
+      if (got !== want) return `${input} -> ${got}, expected ${want}`;
+    }
+    return null;
+  });
+
+  // Step 4 ("copy every snippet from a passing test") is unsatisfiable for a
+  // past-the-horizon feature using the artifact alone, which is exactly when syntax gets
+  // written from memory. The tests exist upstream; these assert we point at them, and that a
+  // truncated lookup is never reported as "no tests upstream".
+  check('upstream: a gapped flag points at real upstream tests to copy from', () => {
+    const h = {
+      upstreamTests: { ok: true, truncated: false, flags: {
+        'iterator-chunking': {
+          dirs: ['test/built-ins/Iterator/prototype/chunks'],
+          samples: [{ path: 'test/built-ins/Iterator/prototype/chunks/a.js', url: 'https://x/a.js', text: 'x' }],
+          truncated: false,
+        },
+      } },
+    };
+    const text = jsUpstreamLines(h, 'iterator-chunking').join(' ');
+    if (!/Iterator\/prototype\/chunks/.test(text)) return 'did not name the upstream directory';
+    return /from memory/.test(text) ? null : 'did not warn against writing from memory';
+  });
+
+  check('upstream: a truncated lookup is not reported as "no tests upstream"', () => {
+    const h = { upstreamTests: { ok: true, truncated: true, flags: {
+      'export-defer': { dirs: [], samples: [], truncated: true },
+    } } };
+    const text = jsUpstreamLines(h, 'export-defer').join(' ');
+    return /truncated/.test(text) && /NOT "no tests upstream"/.test(text)
+      ? null : `truncation was not distinguished: ${text}`;
+  });
+
+  check('upstream: a flag with genuinely no tests upstream says nothing extra', () => {
+    // test262.fyi already reports "no test262 tests exist yet" for these; a second, vaguer
+    // line about a truncated lookup would contradict it.
+    const h = {
+      fyi: { ok: true, results: { 'export-defer': { noTests: true, total: 0 } } },
+      upstreamTests: { ok: true, truncated: true, flags: { 'export-defer': { dirs: [], samples: [], truncated: true } } },
+    };
+    return jsUpstreamLines(h, 'export-defer').length === 0
+      ? null : 'contradicted the "no tests exist" finding';
+  });
+
+  check('upstream: a metadata test is not chosen as the example', () => {
+    const { sampleScore } = require(path.join(SCRIPTS, 'lib', 'test262.js'));
+    const f = (name, patch = '') => ({ filename: `test/built-ins/Iterator/prototype/chunks/${name}`, patch });
+    const behavioural = f('chunks-evenly-divisible.js', 'function* g() { yield 1; }\nassert.compareArray(x, [1]);');
+    for (const dull of ['length.js', 'prop-desc.js', 'chunkSize-not-a-number.js']) {
+      if (sampleScore(f(dull, 'assert.throws(TypeError, ...)')) >= sampleScore(behavioural)) {
+        return `${dull} scored at least as high as a behavioural test`;
+      }
+    }
+    return null;
+  });
+
+  check('horizon: a failed or absent check never renders as "no gaps"', () => {
+    // The one thing an unmeasured blind spot must not be able to look like. Both the
+    // report section and the inventory caveat have to say so out loud.
+    const { jsHorizonLines } = require(path.join(SCRIPTS, 'lib', 'render.js'));
+    for (const [label, h] of [['absent', undefined], ['failed', { ok: false, error: 'boom' }]]) {
+      const text = jsHorizonLines(h).join('\n');
+      if (!/NOT CHECKED/.test(text)) return `a ${label} horizon rendered without saying so`;
+      if (jsGapBoxes(h).length) return `a ${label} horizon produced boxes`;
+    }
+    return null;
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Output size — the failure that kept arriving through different doors
 // ---------------------------------------------------------------------------
 // Five separate times, a view outgrew what a tool result holds. The harness then
@@ -652,6 +1179,8 @@ function outputSizeChecks(dir) {
     ['wpt-state.js', ['--grep', '/', '--limit', '0']],
     ['wpt-fetch-tests.js', ['--area', '/css', '--top', '5', '--head', '0']],
     ['wpt-runs.js', ['--max-count', '40']],
+    // --stored is this script's offline form; without it, it fetches.
+    ['wpt-js-gaps.js', ['--stored']],
   ];
   for (const [script, args] of cases) {
     check(`output fits or pages: ${script} ${args.join(' ')}`.trim(), () => {
@@ -694,6 +1223,7 @@ function outputSizeChecks(dir) {
       ['wpt-grep.js', ['color']],
       ['wpt-fetch-tests.js', ['--area', '/css', '--top', '3', '--head', '10']],
       ['wpt-report.js', []],
+      ['wpt-js-gaps.js', ['--stored']],
     ];
     // Only wpt-runs.js and wpt-collect.js operate without an artifact; everything else
     // needs one named. Suggested commands used to omit it, relying on "there is only one
@@ -701,7 +1231,7 @@ function outputSizeChecks(dir) {
     // then every "continue with" line fails with "name the one you mean", exactly when
     // someone is working across two. Asserting the property here rather than staging a
     // second artifact, since the property is what has to hold.
-    const NEEDS_ARTIFACT = /node scripts\/wpt-(inventory|report|subtests|grep|state|fetch-tests|resolve)\.js/;
+    const NEEDS_ARTIFACT = /node scripts\/wpt-(inventory|report|subtests|grep|state|fetch-tests|resolve|js-gaps)\.js/;
     const offenders = [];
     for (const [script, args] of probes) {
       let out;
@@ -1158,6 +1688,7 @@ function generalChecks(dir) {
   // wiped — which is most of the time during end-to-end testing.
   rollupChecks();
   checklistChecks();
+  await horizonChecks();
 
   let missing = 0;
   for (const c of cases) {

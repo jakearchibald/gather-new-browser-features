@@ -47,9 +47,12 @@
  * --------------
  *   diff.json      every changed test file, with COMPLETE subtest evidence — every
  *                  name, status and assertion message that changed state. Nothing
- *                  is capped, which is what keeps wpt-subtests.js offline.
- *   report.txt     the ranked view, plus the two sections ranking would hide:
- *                  directory clusters and shared subtest vocabulary.
+ *                  is capped, which is what keeps wpt-subtests.js offline. Also
+ *                  `jsHorizon`: which JavaScript features this comparison cannot
+ *                  show at all, because WPT vendors test262 rather than tracking it
+ *                  and the snapshot is months behind. See lib/test262.js.
+ *   report.txt     the ranked view, plus the sections ranking would hide: directory
+ *                  clusters, shared subtest vocabulary, and the JS coverage horizon.
  *   checklist.md   the coverage worksheet. Tick it in place; wpt-inventory.js
  *                  --verify fails while any box is open or carries no real verdict.
  *   boxes.json     the box list as generated, before anyone edits the worksheet.
@@ -64,8 +67,9 @@
  *   sources/       each changed test's source at the revision its run was tested
  *                  at — not master, which is whatever the test says today.
  *
- * Costs, once: two ~20MB summaries, two ~330MB raw reports, and one small GitHub
- * fetch per changed file. Everything downstream is a local read.
+ * Costs, once: two ~20MB summaries, two ~330MB raw reports, one small GitHub fetch
+ * per changed file, and seven tiny ones for the test262 horizon. Everything
+ * downstream is a local read.
  */
 
 const fs = require('fs');
@@ -79,6 +83,9 @@ const { fetchSummary, writeState } = require('./lib/summary.js');
 const { subtestDelta, findClusters, findVocabulary } = require('./lib/analyse.js');
 const { renderReport, renderChecklist, boxPaths } = require('./lib/render.js');
 const { prefetchSources } = require('./lib/sources.js');
+const { fetchCoverageHorizon } = require('./lib/test262.js');
+const { whatShipped, sourceFor } = require('./lib/shipped.js');
+const { fetchResults } = require('./lib/test262fyi.js');
 const artifact = require('./lib/artifact.js');
 const { usage, num, unknownOption } = require('./lib/cli.js');
 const { classify, statusDirection, areaOf, revisionResolver } = require('./lib/wpt.js');
@@ -360,6 +367,72 @@ function writeAtomic(file, contents) {
   }
 }
 
+/**
+ * Ask the vendor's own release source which of the untested JS features shipped.
+ *
+ * Dispatched per product, because this hole is not Firefox-specific and answering a Chrome
+ * comparison out of Bugzilla would be nonsense. Safari has no machine-readable source at
+ * all, which lib/shipped.js reports as a named limit rather than as a "no".
+ */
+async function resolveGapsFromVendor(jsHorizon, afterRun) {
+  const features = [...jsHorizon.missing, ...(jsHorizon.revendored || [])];
+  if (!features.length) return null;
+  const spec = sourceFor(afterRun.browser_name);
+  if (spec && spec.kind === 'unsupported') {
+    // Said out loud at collection time. A silent "not applicable" reads as a glitch; this
+    // is a known gap with somewhere else to look.
+    process.stderr.write(
+      `  no release-attribution source for ${afterRun.browser_name}: ${spec.why}.\n` +
+        '  "Which version" stays UNANSWERED for those flags, which is not the same as "no".\n',
+    );
+    return whatShipped(features, afterRun.browser_name, afterRun.browser_version);
+  }
+  process.stderr.write(
+    `  asking ${spec ? spec.source : 'the vendor'} which of them shipped in ` +
+      `${afterRun.browser_name} ${afterRun.browser_version}...\n`,
+  );
+  const result = await whatShipped(features, afterRun.browser_name, afterRun.browser_version);
+  if (!result.ok) {
+    process.stderr.write(`  note: release lookup failed (${result.error})\n`);
+    return result;
+  }
+  const shipped = result.findings.filter((f) => f.outcome === 'shipped');
+  const unknown = result.findings.filter((f) => f.outcome === 'unknown');
+  process.stderr.write(
+    `  ${shipped.length} of ${result.findings.length} shipped in ${result.version}` +
+      `${unknown.length ? `, ${unknown.length} not found (UNKNOWN, not "no")` : ''}.\n`,
+  );
+  for (const f of shipped) {
+    // Named as they are found: this is the one thing in a collection run that is already a
+    // finished release-note finding rather than an input to one.
+    process.stderr.write(`    ${f.feature.name} -> ${(f.evidence[0] || '').slice(0, 90)}\n`);
+  }
+  return result;
+}
+
+/**
+ * Ask test262.fyi whether the untested JS features actually work, and whether they need
+ * experimental options. Test evidence, to sit beside Bugzilla's release attribution.
+ */
+async function resolveGapsFromTest262Fyi(jsHorizon, afterRun) {
+  const features = [...jsHorizon.missing, ...(jsHorizon.revendored || [])];
+  if (!features.length) return null;
+  process.stderr.write('  asking test262.fyi whether they pass, and in which config...\n');
+  const fyi = await fetchResults(features, afterRun.browser_name);
+  if (!fyi.ok) {
+    process.stderr.write(`  note: test262.fyi lookup failed (${fyi.error})\n`);
+    return fyi;
+  }
+  const gated = Object.values(fyi.results).filter((r) => r.prefGated).length;
+  const none = Object.values(fyi.results).filter((r) => r.noTests).length;
+  process.stderr.write(
+    `  ${fyi.tracked} tracked on ${fyi.engine} ${fyi.version} (NIGHTLY, not the release above)` +
+      `${gated ? `, ${gated} pass only with experimental options` : ''}` +
+      `${none ? `, ${none} have no tests upstream at all` : ''}.\n`,
+  );
+  return fyi;
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
 
@@ -416,6 +489,35 @@ async function main() {
     ]);
     ({ run: beforeRun, summary: beforeSummary } = b);
     ({ run: afterRun, summary: afterSummary } = a);
+  }
+
+  // ---- how stale is the vendored test262? ----
+  // Done here, before the ~660MB of raw reports, because it changes how everything
+  // after it should be read: WPT vendors test262 rather than tracking it, and on one
+  // real comparison the snapshot was 117 days old — so three Iterator proposals
+  // Firefox had shipped had no test in either run and were absent from the notes.
+  // Seven small fetches, and best-effort: see lib/test262.js.
+  process.stderr.write('Checking how stale the vendored test262 is...\n');
+  const jsHorizon = await fetchCoverageHorizon({
+    beforeRevision: beforeRun.revision,
+    afterRevision: afterRun.revision,
+  });
+  if (!jsHorizon.ok) {
+    process.stderr.write(`note: test262 horizon check failed (${jsHorizon.error})\n`);
+    process.stderr.write('      JS coverage gaps are UNKNOWN for this artifact, not absent.\n');
+  } else {
+    const lag = jsHorizon.lagDays === null ? 'unknown age' : `${jsHorizon.lagDays} days old`;
+    process.stderr.write(
+      `  test262 snapshot ${jsHorizon.after.rev.slice(0, 10)} (${lag}); ` +
+        `${jsHorizon.missing.length} upstream feature flag(s) have no tests here.\n`,
+    );
+    // Answer those gaps here, rather than leaving the reader to search for them.
+    // Handing over a bare flag name and the words "check Bugzilla" produced a WORSE
+    // outcome than saying nothing: `quicksearch=iterator-chunking` returns zero bugs,
+    // so all three shipped Iterator proposals were surfaced, looked up, and then
+    // actively ruled out as not shipping. See lib/bugzilla.js.
+    jsHorizon.shipped = await resolveGapsFromVendor(jsHorizon, afterRun);
+    jsHorizon.fyi = await resolveGapsFromTest262Fyi(jsHorizon, afterRun);
   }
 
   // ---- classify every test ----
@@ -515,6 +617,9 @@ async function main() {
     clusterMin: opts.clusterMin,
     clusterRatio: opts.clusterRatio,
     subtestCoverage: { changed: rows.length, found, withNames },
+    // What this comparison structurally cannot show, for JavaScript. Every other
+    // blind spot here is a reading failure; this one is a hole in the data.
+    jsHorizon,
     before: {
       spec: opts.fromSpec.label,
       product: beforeRun.browser_name,
@@ -656,6 +761,23 @@ async function main() {
   if (artifact.discover().length > 1) {
     console.log('');
     console.log(`  (tmp/ holds more than one comparison, so pass ${rel} to each)`);
+  }
+  // Printed near the end, with the other "what this diff cannot tell you" notes,
+  // because it is the same kind of fact and the easiest one to forget: the tooling's
+  // silence about a JS feature is indistinguishable from the feature not shipping.
+  if (!jsHorizon.ok) {
+    console.log('');
+    console.log('NOTE: could not check how stale WPT\'s vendored test262 is, so JS coverage');
+    console.log(`      gaps are UNKNOWN rather than absent (${jsHorizon.error}).`);
+    console.log('      Re-collect with network access, or check MDN/Bugzilla for JS features by hand.');
+  } else if (jsHorizon.missing.length || jsHorizon.revendored.length) {
+    const lag = jsHorizon.lagDays === null ? '' : `, ${jsHorizon.lagDays} days behind upstream`;
+    console.log('');
+    console.log(`NOTE: WPT vendors test262 rather than tracking it${lag}, so this comparison`);
+    console.log(`      contains NO test for ${jsHorizon.missing.length} upstream feature flag(s) — a JS feature can`);
+    console.log('      have shipped and be invisible in every view here, at every pass rate.');
+    console.log('      They are boxed in checklist.md and gated by --verify. Read them with:');
+    console.log(`        node scripts/wpt-report.js ${rel} --section javascript`);
   }
   if (report.before.wpt_revision !== report.after.wpt_revision) {
     // Quantified, because "some of this diff" is unactionable and the real figure is

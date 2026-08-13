@@ -153,7 +153,24 @@ for (const t of targets) {
   lines.push('#'.repeat(70));
   if (!cached) {
     missing++;
-    lines.push('(not in the cache — is this a changed test in this comparison?)');
+    // The commonest reason a bare path misses is that the diff holds it only as `?query`
+    // variants, so the bare string is not a cache key. The old message — "is this a changed
+    // test in this comparison?" — pointed at the wrong conclusion, because it IS one: one
+    // pass gave up on text-box-trim-start-001.html, which is in the diff 17 times. The
+    // SKILL's --grep guidance is framed around shell quoting, so nothing connected it to
+    // cache-key resolution either.
+    const variants = report.tests
+      .filter((r) => r.kind !== 'unchanged' && r.test.startsWith(`${t}?`))
+      .map((r) => r.test);
+    if (variants.length) {
+      lines.push(`(this path is in the diff only as ${variants.length} ?query variant(s), so the bare`);
+      lines.push(' path is not a cache key. Reach them all with:');
+      lines.push(`   node scripts/wpt-fetch-tests.js ${artifact.rel(art.dir)} --grep ${grepFragment(t)}`);
+      lines.push(` first variant: ${variants[0].slice(t.length)})`);
+    } else {
+      lines.push('(not in the cache — no changed test in this comparison has this path. Check');
+      lines.push(' the spelling, or search for it:  node scripts/wpt-grep.js <fragment>)');
+    }
   } else if (!cached.text.trim()) {
     missing++;
     lines.push('(no source at the run\'s revision — generated variant, or renamed since)');
