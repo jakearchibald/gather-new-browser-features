@@ -48,6 +48,7 @@ node scripts/wpt-fetch-tests.js --area /fetch --top 3
 node scripts/wpt-grep.js      pseudoElement
 node scripts/wpt-state.js     --grep sound-state     # is there even a test?
 node scripts/wpt-js-gaps.js   --stored               # what JS features CANNOT be seen
+node scripts/wpt-bugs.js      --gaps                # what shipped that the diff cannot show
 ```
 
 **Every view is paged.** A tool result holds roughly 30KB, and several of these views
@@ -129,6 +130,7 @@ which release turned it on. Both are printed, and a disagreement is reported as 
 | [wpt-fetch-tests.js](scripts/wpt-fetch-tests.js) | Print cached test source so code examples are accurate rather than guessed — at the revision the runs were tested at, not `master`. |
 | [wpt-grep.js](scripts/wpt-grep.js) | Search subtest names and messages, paths, then test source. A filename often contains no word from the feature's name. |
 | [wpt-state.js](scripts/wpt-state.js) | Absolute pass/fail of any test in both runs, including the ~120k the diff omits. "Not in the diff" never means "not shipped". `--only failing-after` answers "what's still broken in this feature?". |
+| [wpt-bugs.js](scripts/wpt-bugs.js) | The vendor's own changelog for the release, cross-referenced against the diff — the only view that runs feature → test. Catches changes the diff *does* show and you skimmed past, changes WPT has no coverage for at all (DevTools, WebExtensions), and bugs that are FIXED but still behind a pref. |
 | [wpt-js-gaps.js](scripts/wpt-js-gaps.js) | Which JavaScript features this comparison *cannot* show, because WPT's vendored test262 predates them — plus, from test262.fyi and the "to" vendor's release source, which of those actually shipped. Networked; `--stored` is the offline form, `--add` backfills the boxes into an older artifact. |
 | [wpt-resolve.js](scripts/wpt-resolve.js) | Apply a `{"box path": "verdict"}` file to the checklist. Exact keys only, no patterns, no fallback — a key matching no box writes nothing. Ticking boxes by hand cost 22% of one run's entire output. |
 | [selftest.js](scripts/selftest.js) | Asserts the tooling still surfaces the features it has historically missed, and that nothing but the collector touches the network. Run it after changing any of the above. |

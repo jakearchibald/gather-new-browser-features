@@ -84,8 +84,9 @@ const { subtestDelta, findClusters, findVocabulary } = require('./lib/analyse.js
 const { renderReport, renderChecklist, boxPaths } = require('./lib/render.js');
 const { prefetchSources } = require('./lib/sources.js');
 const { fetchCoverageHorizon } = require('./lib/test262.js');
-const { whatShipped, sourceFor } = require('./lib/shipped.js');
+const { whatShipped, sourceFor, majorVersion } = require('./lib/shipped.js');
 const { fetchResults } = require('./lib/test262fyi.js');
+const { fetchChangelog } = require('./lib/changelog.js');
 const artifact = require('./lib/artifact.js');
 const { usage, num, unknownOption } = require('./lib/cli.js');
 const { classify, statusDirection, areaOf, revisionResolver } = require('./lib/wpt.js');
@@ -611,6 +612,34 @@ async function main() {
     );
   }
 
+  // ---- what the vendor says shipped, cross-referenced against what moved ----
+  // The only source here that runs feature -> test rather than test -> feature, which is why
+  // it catches both a reading miss (RTCIceTransport.getSelectedCandidatePair(), in the diff
+  // and absent from the notes) and a coverage gap (:open for <select>, FAIL 0/0 in both runs
+  // so no view here can show it). Firefox only; ~4 queries, ~570KB.
+  process.stderr.write('Fetching the vendor changelog for the release...\n');
+  // Tests not fully passing in the "to" run, so a changelog entry whose feature is preffed
+  // off can be identified as landed-but-not-enabled rather than as missing coverage.
+  const stillFailing = [];
+  for (const [test, after] of afterSummary) {
+    if (!after || after.total === 0 || after.pass < after.total) {
+      stillFailing.push({ test, pass: after ? after.pass : 0, total: after ? after.total : 0 });
+    }
+  }
+  const changelog = await fetchChangelog(
+    netFetch, afterRun.browser_name, majorVersion(afterRun.browser_version),
+    rows.filter((r) => r.kind !== 'unchanged'), stillFailing,
+  );
+  if (!changelog.ok) {
+    process.stderr.write(`note: ${changelog.unsupported ? '' : 'changelog lookup failed — '}${changelog.error}\n`);
+  } else {
+    const gaps = changelog.curated.filter((b) => !b.hits.length);
+    process.stderr.write(
+      `  ${changelog.total} bug(s) fixed for ${changelog.milestone}; ${changelog.curated.length} flagged `
+        + `developer-facing, ${gaps.length} with no matching diff evidence.\n`,
+    );
+  }
+
   const report = {
     generated: new Date().toISOString(),
     aligned: opts.aligned,
@@ -620,6 +649,8 @@ async function main() {
     // What this comparison structurally cannot show, for JavaScript. Every other
     // blind spot here is a reading failure; this one is a hole in the data.
     jsHorizon,
+    // The vendor's own list of what shipped, matched against the diff. See lib/changelog.js.
+    changelog,
     before: {
       spec: opts.fromSpec.label,
       product: beforeRun.browser_name,

@@ -1137,6 +1137,147 @@ Temporal
     return null;
   });
 
+  // -------------------------------------------------------------------------
+  // The vendor changelog — feature -> test, the only source running that way
+  // -------------------------------------------------------------------------
+  // Two real misses on one release, in opposite directions, both invisible to every other
+  // view: bug 2019332 (RTCIceTransport.getSelectedCandidatePair) WAS in the diff as
+  // newly-passing IDL subtests and absent from the notes; bug 2048183 (:open for <select>)
+  // was not in the diff at all, its test being FAIL 0/0 in both runs.
+  const cl = require(path.join(SCRIPTS, 'lib', 'changelog.js'));
+  const { bugFinding, bugGapBoxes, bugChecklistLines, boxPaths: bp } =
+    require(path.join(SCRIPTS, 'lib', 'render.js'));
+
+  check('changelog: a bug summary yields the API identifiers, not the prose', () => {
+    const t = cl.tokensFor('Implement RTCIceTransport.getSelectedCandidatePair()/onselectedcandidatepairchange');
+    for (const want of ['RTCIceTransport', 'getSelectedCandidatePair']) {
+      if (!t.strong.includes(want)) return `${want} was not strong: ${JSON.stringify(t)}`;
+    }
+    return t.strong.includes('Implement') ? 'the verb "Implement" was kept as an identifier' : null;
+  });
+
+  check('changelog: a bare capitalised word is a WEAK token, not evidence', () => {
+    // Promoting these was measurably wrong: `Typed` (from "Enable CSS Typed OM") matched a
+    // WebRTC file, `JSON` matched a webauthn test, and `Select` produced 14 hits that BURIED
+    // the real finding — that WPT cannot see :open for <select> at all.
+    const t = cl.tokensFor('Implement :open pseudo class for Select elements');
+    if (t.strong.includes('Select')) return '"Select" was treated as strong evidence';
+    return t.weak.includes('Select') ? null : `"Select" was dropped entirely: ${JSON.stringify(t)}`;
+  });
+
+  check('changelog: a pref name contributes its feature-directory prefix', () => {
+    // The pref is layout.css.tree-counting-functions.enabled; the tests are in
+    // /css/css-values/tree-counting, so exact matching misses a headline feature.
+    const t = cl.tokensFor('Set layout.css.tree-counting-functions.enabled for all users');
+    return t.weak.includes('tree-counting')
+      ? null : `no tree-counting prefix: ${JSON.stringify(t)}`;
+  });
+
+  check('changelog: precise tokens that MISS still fall back to the weak pass', () => {
+    // The bug this guards: the weak pass was gated on strong tokens existing rather than on
+    // strong tokens HITTING, so a bug with precise-but-unmatched tokens reported "NOT in the
+    // diff" while the feature's directory sat right there.
+    const changed = [{
+      test: '/css/css-values/tree-counting/calc-sibling-function-parsing.html',
+      deltaPass: 4,
+      subtests: { newlyPassing: [{ name: 'sibling-index() in calc' }] },
+    }];
+    const r = cl.matchAgainstDiff(
+      { summary: 'Set layout.css.tree-counting-functions.enabled for all users' }, changed);
+    if (r.hits.length) return 'the precise pref name matched, so this case was not exercised';
+    return r.weakHits.length ? null : 'the weak pass did not run after the strong pass missed';
+  });
+
+  check('changelog: a summary with no usable token is UNSEARCHABLE, not "not in the diff"', () => {
+    const r = cl.matchAgainstDiff({ summary: 'Set the pref for all users' }, []);
+    if (!r.unsearchable) return `expected unsearchable, got ${JSON.stringify(r).slice(0, 90)}`;
+    const { short, lines } = bugFinding({ ...r });
+    return /NOT CHECKED/.test(short) && /not the same as/.test(lines.join(' '))
+      ? null : `rendered as "${short}"`;
+  });
+
+  check('changelog: a matched bug says the evidence is already in the diff', () => {
+    const bug = {
+      id: 1, summary: 'Implement RTCDtlsTransport.onerror', product: 'Core', component: 'WebRTC',
+      unsearchable: false, tokens: ['RTCDtlsTransport'], weakTokens: [], weakHits: [],
+      hits: [{ test: '/webrtc/idlharness.https.window.html', deltaPass: 2, matched: ['RTCDtlsTransport'], subtest: 'RTCDtlsTransport interface: attribute onerror' }],
+    };
+    const { short, lines } = bugFinding(bug);
+    if (!/in the diff/.test(short)) return `short form did not say so: ${short}`;
+    return /you missed it/.test(lines.join(' ')) ? null : 'did not tell the reader to check the notes';
+  });
+
+  // The correction that mattered most: `:open` for <select> is FIXED with a dev-doc keyword
+  // and its test fails in BOTH runs — because the feature is behind a pref, so the failing
+  // test is CORRECT. Reporting that as "no WPT coverage, the bug is the only source" inverted
+  // the truth. resolution=FIXED means landed, not enabled.
+  check('changelog: the summary\'s own "behind pref" wording is read', () => {
+    const cases = [
+      ['Implement progress() function behind pref', 'behind pref'],
+      ['Enable CSS Typed OM by default in Nightly', 'in Nightly'],
+      ['[text-box-trim] Set layout.css.text-box.enabled for nightly', 'for nightly'],
+      // ...and must NOT fire on the bug that actually ships it.
+      ['Set layout.css.text-box.enabled for all users', null],
+      ['Ship Iterator Join proposal', null],
+    ];
+    for (const [summary, want] of cases) {
+      const got = cl.enablementFromSummary(summary);
+      if ((got || null) !== want && !(want && got && got.toLowerCase() === want.toLowerCase())) {
+        return `${JSON.stringify(summary)} -> ${JSON.stringify(got)}, expected ${JSON.stringify(want)}`;
+      }
+    }
+    return null;
+  });
+
+  check('changelog: "not in the diff" never claims to be the only source', () => {
+    // Three reasons produce an empty match and only one is "no coverage". Asserting which is
+    // how the :open error happened, so the wording must offer all three.
+    const r = cl.matchAgainstDiff({ summary: 'Implement RTCFoo.barBaz()' }, [], []);
+    const { short, lines } = bugFinding({ ...r, id: 1 });
+    const text = lines.join(' ');
+    if (/only source/.test(short)) return `the short form asserts it: ${short}`;
+    for (const want of [/NOT enabled/, /no WPT coverage/, /vocabulary/]) {
+      if (!want.test(text)) return `the three possibilities are not all offered: missing ${want}`;
+    }
+    return null;
+  });
+
+  check('changelog: the still-failing probe uses PRECISE tokens only', () => {
+    // With weak tokens it matched hundreds of unrelated failing paths and reported every bug
+    // as "landed, not enabled" — including the three Iterator proposals that had shipped.
+    const stillFailing = [
+      { test: '/css/css-values/some-alpha-thing.html', pass: 0, total: 3 },
+      { test: '/webrtc/RTCIceTransport-extension.html', pass: 0, total: 3 },
+    ];
+    // "alpha" is a weak token: it must NOT reach the failing probe.
+    const weakOnly = cl.matchAgainstDiff({ summary: 'Implement alpha() function behind pref' }, [], stillFailing);
+    if (weakOnly.failingHits.length) return 'a weak token matched failing paths';
+    // A precise one should.
+    const precise = cl.matchAgainstDiff({ summary: 'Implement RTCIceTransport.foo()' }, [], stillFailing);
+    return precise.failingHits.length ? null : 'a precise token did not match a failing path';
+  });
+
+  check('changelog: every bug becomes a box, and box paths need no quoting', () => {
+    const fresh = {
+      ok: true, version: 154, milestone: '154 Branch', total: 3256,
+      curated: [
+        { id: 2048183, summary: ':open for select', product: 'Core', component: 'DOM', tokens: ['x'], weakTokens: [], hits: [], weakHits: [], unsearchable: false },
+        { id: 2019332, summary: 'RTCIceTransport.getSelectedCandidatePair()', product: 'Core', component: 'WebRTC', tokens: ['RTCIceTransport'], weakTokens: [], weakHits: [], unsearchable: false, hits: [{ test: '/a.html', deltaPass: 2, matched: ['RTCIceTransport'], subtest: 'x' }] },
+      ],
+      census: [],
+    };
+    const boxes = bugGapBoxes(fresh);
+    if (boxes.length !== 2) return `expected 2 boxes, got ${boxes.length}`;
+    const bad = boxes.map((b) => b.path).filter((x) => /[?()|[\]$;<>*'"\s&\\]/.test(x));
+    if (bad.length) return `needs quoting: ${bad.join(', ')}`;
+    const paths = bp(bugChecklistLines(fresh).join('\n'));
+    for (const b of boxes) {
+      if (!paths.includes(b.path)) return `${b.path} is not a parseable box`;
+    }
+    // The gap must sort before the matched one: it is the one nothing else will mention.
+    return paths[0] === 'bug:2048183' ? null : `gaps did not sort first: ${paths.join(',')}`;
+  });
+
   check('horizon: a failed or absent check never renders as "no gaps"', () => {
     // The one thing an unmeasured blind spot must not be able to look like. Both the
     // report section and the inventory caveat have to say so out loud.
@@ -1181,6 +1322,9 @@ function outputSizeChecks(dir) {
     ['wpt-runs.js', ['--max-count', '40']],
     // --stored is this script's offline form; without it, it fetches.
     ['wpt-js-gaps.js', ['--stored']],
+    ['wpt-bugs.js', []],
+    ['wpt-bugs.js', ['--census']],
+    ['wpt-bugs.js', ['--component', 'Layout']],
   ];
   for (const [script, args] of cases) {
     check(`output fits or pages: ${script} ${args.join(' ')}`.trim(), () => {
@@ -1224,6 +1368,7 @@ function outputSizeChecks(dir) {
       ['wpt-fetch-tests.js', ['--area', '/css', '--top', '3', '--head', '10']],
       ['wpt-report.js', []],
       ['wpt-js-gaps.js', ['--stored']],
+      ['wpt-bugs.js', []],
     ];
     // Only wpt-runs.js and wpt-collect.js operate without an artifact; everything else
     // needs one named. Suggested commands used to omit it, relying on "there is only one
@@ -1231,7 +1376,7 @@ function outputSizeChecks(dir) {
     // then every "continue with" line fails with "name the one you mean", exactly when
     // someone is working across two. Asserting the property here rather than staging a
     // second artifact, since the property is what has to hold.
-    const NEEDS_ARTIFACT = /node scripts\/wpt-(inventory|report|subtests|grep|state|fetch-tests|resolve|js-gaps)\.js/;
+    const NEEDS_ARTIFACT = /node scripts\/wpt-(inventory|report|subtests|grep|state|fetch-tests|resolve|js-gaps|bugs)\.js/;
     const offenders = [];
     for (const [script, args] of probes) {
       let out;
@@ -1537,7 +1682,10 @@ function generalChecks(dir) {
     const zeroSub = diff.tests.filter((t) => t.kind === 'newly-running'
       && (t.after?.total || 0) === 0 && (t.before?.total || 0) === 0);
     if (!zeroSub.length) return null;
-    const out = run('wpt-report.js', [dir]);
+    // --all, because the property under test is "not out-ranked and not cut by --top", not
+    // "lands on page one". Adding any section above them would otherwise fail this check
+    // while the ranking it guards was still correct.
+    const out = run('wpt-report.js', [dir, '--all']);
     const missing = zeroSub.filter((t) => !out.includes(t.test));
     return missing.length
       ? `${missing.length} of ${zeroSub.length} crash/hang fixes absent from report.txt, e.g. ${missing[0].test}`

@@ -104,6 +104,7 @@ const ALIASES = [
   // the ones they are looking for a feature *in* — "javascript", "js", "test262" —
   // and the section is precisely a list of JS features no other section can hold.
   [/^JavaScript coverage horizon/, 'javascript js test262 ecmascript tc39 gaps horizon blindspot missing'],
+  [/^Vendor changelog/, 'changelog bugs bugzilla vendor shipped milestone leads'],
   [/^Directory clusters/, 'clusters cluster directories leads'],
   [/^One feature, several directories/, 'vocabulary tokens feature-across-areas leads'],
   [/no subtests \(reftests/, 'reftests reftest rendering'],

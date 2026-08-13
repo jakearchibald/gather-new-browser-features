@@ -357,4 +357,6 @@ function detectRenames(subtests) {
   return { paired, examples };
 }
 
-module.exports = { subtestDelta, findClusters, findVocabulary, messageRollup, detectRenames };
+module.exports = {
+  subtestDelta, findClusters, findVocabulary, messageRollup, detectRenames, identifierShaped,
+};

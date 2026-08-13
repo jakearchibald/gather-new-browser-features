@@ -207,7 +207,7 @@ breaks only between directories and tells you what you have not yet seen; `--inc
 bounded and loses nothing. Both beat `head`, `tail` and `sed` on the only axis that
 matters, which is whether you can tell what you missed.
 
-**Finish the worksheet.** The artifact's `checklist.md` has **three** lists, all of which must be
+**Finish the worksheet.** The artifact's `checklist.md` has **four** lists, all of which must be
 resolved. Replace the box with `[x]`/`(x)` and append `" — <verdict>"`, one of:
 
 ```
@@ -256,7 +256,9 @@ so a typo cannot silently do nothing. Resolve in as many passes as you like.
 1. **`[ ]` directories** (200–400 on a two-release diff). Churn-only ones arrive resolved.
 2. **`( )` / `(?)` files** — every `*done*` file plus every file whose evidence names
    nothing. **Ticking a directory does not tick these.**
-3. **`[ ] test262-feature:<flag>`** — JavaScript features with no test on either side,
+3. **`[ ] bug:<id>`** — bugs Mozilla flagged as developer-facing for this release, each
+   carrying its own cross-reference against the diff. See step 2b.
+4. **`[ ] test262-feature:<flag>`** — JavaScript features with no test on either side,
    because WPT's vendored test262 predates them. Usually a handful. The box already
    carries Bugzilla's answer (`SHIPPED in 154, bug 2047997`); transcribe it, and **do not
    re-check by searching the flag name — that returns nothing for features that shipped.**
@@ -396,6 +398,48 @@ them. There is no assertion message to quote, so group them by directory and say
 directory covers. They are not a footnote: one Firefox stable→beta diff had 140 now
 passing and 8 now failing, including a `css/css-transforms` regression cluster that no
 subtest count would have surfaced.
+
+## Step 2b: Cross-check against the vendor's own changelog
+
+**Every other view here runs test → feature. This one runs feature → test**, and that
+direction catches two things nothing else can. For a Firefox comparison the collector
+queries Bugzilla for everything resolved `FIXED` against the release's milestone, and picks
+out the bugs carrying `dev-doc-needed`/`dev-doc-complete` — Mozilla's own marker for "a web
+developer needs to be told about this" — then matches each against the diff:
+
+```bash
+node scripts/wpt-bugs.js              # the developer-facing list, gaps first
+node scripts/wpt-bugs.js --gaps       # only the ones the diff cannot show
+node scripts/wpt-bugs.js --census     # every component, with counts
+node scripts/wpt-bugs.js --component Layout    # drill into the rest, locally
+```
+
+On the 153→154 pass that was 21 bugs out of 3256 fixed.
+
+**`resolution=FIXED` means landed, not enabled** — and getting that wrong is the one error
+this step has already produced. `:open` for `<select>` is FIXED with a dev-doc keyword, and
+its test fails in *both* runs because the feature is behind a pref: the failing test is
+**correct**, and reading it as "no WPT coverage, so the bug is the only source" inverted the
+truth. Several of the 21 are like this — `progress()` and `alpha()` say "behind pref" outright,
+CSS Typed OM is nightly-only (`0/1` in beta), `line-clamp` has 218 of 300 still failing. Where
+the summary says so, the box says so; where it doesn't, **check before writing anything up**.
+
+| Outcome on the box | Means |
+| --- | --- |
+| `in the diff (N file(s))` | The evidence is already here, with the file and subtest named. **If it is not in your notes, you missed it** — this is how `RTCIceTransport.getSelectedCandidatePair()` was found, buried in `idlharness…?include=(…)`. |
+| `in the diff, but <behind pref \| for nightly>` | Landed and visible, but not on for users. Two bugs can name the same feature — `text-box.enabled for nightly` and `…for all users` — and only the second is news. |
+| `not in the diff` | Three possible reasons, and the box lists all three rather than picking: preffed off; genuinely no WPT coverage (DevTools, WebExtensions and internal media changes never are); or covered under vocabulary these tokens missed. |
+| `weak match only (N)` | A generic word matched. **A lead, not evidence** — `Select` matched 14 unrelated files. Confirm by eye. |
+| `NOT CHECKED` | No usable identifier in the summary, so it was never matched. Not the same as "not in the diff". |
+
+Each becomes a `bug:<id>` checklist box, and `not a feature:` is the right verdict for a real
+bug that is not web-facing, or that landed behind a pref. Saying so is the point.
+
+**This is a lead, not coverage.** The keyword is applied by hand and is certainly
+incomplete: 21 of 3256. The other ~3235 are not discarded — they are stored whole and
+reachable by component or substring with no further network access, so the boundary is
+navigable rather than silent. That is the same bargain `--part` makes with the inventory.
+Non-Firefox comparisons get `NOT APPLICABLE`, since Bugzilla milestones only describe Firefox.
 
 ## Step 3: Find the *cause* — read the subtest messages
 
@@ -716,7 +760,7 @@ There are five honest answers, and four of them are not "yes":
 | Tests moved, messages describe something else | A *different* change. Report both facts. |
 | Test exists, identical in both runs | Not in this diff. Check absolute state before saying "not shipped". |
 | No test matches, and it's a JS/`Intl` feature | Check the horizon first — `wpt-js-gaps.js`. "Past the test262 snapshot" and "untested" are different answers. |
-| No test matches at all | No WPT coverage. Say so plainly. |
+| No test matches at all | No WPT coverage — but check `wpt-bugs.js --grep <word>` before saying "didn't ship". |
 
 **For anything JavaScript, "no test matches" is the answer that needs one more step**, and
 the step is `node scripts/wpt-js-gaps.js` — not a bug search. `Iterator.prototype.chunks`
@@ -742,8 +786,9 @@ needs. `text-box-trim` passes 132 of 143 tests — and six of the eleven failure
 `text-box-trim-line-clamp-*`, i.e. it does not work with `line-clamp` yet. That is a caveat,
 not a footnote, and it is invisible unless you ask for it.
 
-Things with no WPT coverage at all, and so invisible here regardless: rendering fixes with
-no reftest, "stopped working after several navigations"-style bugs, event *ordering* changes
+Things with no WPT coverage at all. These are invisible in the diff — though the vendor
+changelog (step 2b) now reaches some of them, and `wpt-bugs.js --grep` is worth trying
+before concluding anything: rendering fixes with no reftest, "stopped working after several navigations"-style bugs, event *ordering* changes
 where only the negative case is tested, anything whose spec has no tests yet, and **any
 JavaScript feature newer than WPT's vendored test262 snapshot** — the last of which is
 measurable rather than merely possible, and is what `wpt-js-gaps.js` measures. Absence of

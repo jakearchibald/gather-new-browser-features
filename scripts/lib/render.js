@@ -467,6 +467,198 @@ function jsHorizonCaveat(h) {
 }
 
 // ---------------------------------------------------------------------------
+// The vendor changelog — feature -> test, the opposite direction to everything else
+// ---------------------------------------------------------------------------
+
+/** One box path per developer-facing bug. Bare digits, so nothing needs quoting. */
+function bugBoxPath(id) {
+  return `bug:${id}`;
+}
+
+/**
+ * How a bug's cross-reference against the diff reads.
+ *
+ * Four outcomes, and only one of them says "you already have this":
+ *   matched      strong identifier hit in the diff. If it is not in the notes, it was missed.
+ *   weak-only    a hit on a generic word. A LEAD to confirm, not evidence — `Select` matched
+ *                14 files for the `:open` bug and every one was unrelated.
+ *   no-evidence  searched and found nothing: the diff cannot show this, so the notes need it
+ *                from the bug or not at all.
+ *   unsearchable no candidate token in the summary, so it was never checked. Explicitly NOT
+ *                the same as no-evidence.
+ */
+function bugFinding(bug) {
+  // Tests that exist and still fail in the "to" run, matched on a PRECISE identifier only.
+  // Context, never a classification: see lib/changelog.js for why the loose version had to go.
+  const failing = bug.failingHits || [];
+  // The vendor's own wording. This is the only enablement signal here that is stated rather
+  // than inferred, and `resolution=FIXED` does NOT mean enabled — which is the mistake that
+  // produced a confidently wrong finding about `:open` for <select>.
+  const pref = bug.notForUsers
+    ? [`The summary says "${bug.notForUsers}", so this landed but is NOT on for users.`,
+      'Do not write it up as available.']
+    : [];
+  const stillFails = failing.length
+    ? [`${failing.length} test(s) matching ${failing[0].matched.join(', ')} still FAIL after, e.g.`,
+      `  ${failing[0].test}`,
+      'so it may be partly enabled at most. Check with wpt-state.js --only failing-after.']
+    : [];
+
+  if (bug.unsearchable) {
+    return { short: 'NOT CHECKED (no token in the summary)', lines: [
+      'The summary yielded no searchable identifier, so this was never matched against the',
+      'diff. That is not the same as "not in the diff" — read the bug.', ...pref] };
+  }
+  if (bug.hits.length) {
+    const lines = [`in the diff, ${bug.hits.length} file(s) matching ${bug.hits[0].matched.join(', ')}:`];
+    for (const h of bug.hits.slice(0, 3)) {
+      lines.push(`  ${signed(h.deltaPass)}  ${h.test}`);
+      if (h.subtest) lines.push(`      ${clip(h.subtest, 88)}`);
+    }
+    if (bug.hits.length > 3) lines.push(`  ... and ${bug.hits.length - 3} more`);
+    lines.push(...stillFails, ...pref);
+    if (!bug.notForUsers) lines.push('If this is not in your notes, you missed it — the evidence is above.');
+    return {
+      short: bug.notForUsers ? `in the diff, but ${bug.notForUsers}` : `in the diff (${bug.hits.length} file(s))`,
+      lines,
+    };
+  }
+  if (bug.weakHits.length) {
+    return {
+      short: bug.notForUsers ? `weak match, and ${bug.notForUsers}` : `weak match only (${bug.weakHits.length})`,
+      lines: [
+        `No precise identifier matched. ${bug.weakHits.length} file(s) match a generic word `
+          + `(${bug.weakHits[0].matched.join(', ')}), starting with`,
+        `  ${bug.weakHits[0].test}`,
+        'Treat as a lead and confirm by eye: a generic-word match is usually a coincidence.',
+        ...pref],
+    };
+  }
+  // No changed test matched. There are THREE reasons for that and only one of them is "the
+  // bug is the only source", so this must not assert which. Getting that wrong is what
+  // produced the `:open` for <select> error: it is FIXED with a dev-doc keyword, its test
+  // fails in both runs because the feature is preffed off, and reporting it as missing
+  // coverage inverted the truth — WPT was right.
+  return {
+    short: bug.notForUsers ? `not in the diff, and ${bug.notForUsers}` : 'not in the diff',
+    lines: [
+      `Searched the diff for ${bug.tokens.concat(bug.weakTokens).slice(0, 6).join(', ')} and found nothing.`,
+      'Three possibilities, and they need opposite write-ups:',
+      '  - landed but NOT enabled (behind a pref, or nightly-only). Its tests may exist and',
+      '    fail in both runs, which is CORRECT. Check with wpt-state.js before writing it up.',
+      '  - no WPT coverage at all — DevTools, WebExtensions and internal media changes are',
+      '    never in WPT, so the bug really is the only source.',
+      '  - covered, but under vocabulary these tokens missed. Try wpt-grep.js.',
+      ...stillFails, ...pref],
+  };
+}
+
+/**
+ * The changelog section: the developer-facing bugs, gaps first, then the census.
+ *
+ * Gaps first because they are the ones nothing else here will ever mention. The census of
+ * everything else exists so the keyword filter is navigable instead of silent — 21 boxes out
+ * of 3256 fixed bugs is a big cut, `dev-doc` tagging is manual and incomplete, and a reader
+ * who wants an area should be able to get it without another network call.
+ */
+function changelogLines(cl, { censusTop = 24 } = {}) {
+  const L = [];
+  const p = (s = '') => L.push(s);
+  p('## Vendor changelog (what the bug tracker says shipped)');
+  if (!cl) {
+    p('# NOT CHECKED — this artifact predates the changelog sweep. Re-collect to measure it.');
+    p('');
+    return L;
+  }
+  if (!cl.ok) {
+    p(`# ${cl.unsupported ? 'NOT APPLICABLE' : 'NOT CHECKED'} — ${cl.error}`);
+    p('');
+    return L;
+  }
+  const gaps = cl.curated.filter((b) => !b.hits.length);
+  p(`# ${cl.total} bug(s) resolved FIXED for ${cl.milestone}. ${cl.curated.length} carry Mozilla's own`);
+  p('# dev-doc-needed/dev-doc-complete keyword, i.e. "a web developer needs to be told".');
+  p('# This is the only source here that runs feature -> test instead of test -> feature,');
+  p('# which is why it catches what a reader skimmed as well as what WPT cannot see:');
+  p(`# ${gaps.length} of the ${cl.curated.length} have no matching evidence in the diff at all.`);
+  p('#');
+  p('# A LEAD, not coverage: the keyword is applied by hand and is incomplete. Everything');
+  p('# else is in the census below, reachable with wpt-bugs.js --component / --grep.');
+  p('');
+  // Only the gaps here, one line each: the full evidence per bug is on the checklist boxes,
+  // where the verdict gets written, and in wpt-bugs.js. This section is a pointer, because
+  // at full length it displaced the ranked sections off the first page of report.txt.
+  p(`# The ${gaps.length} with no diff evidence — nothing else in this artifact mentions these:`);
+  for (const b of gaps.slice(0, 20)) {
+    p(`  bug ${b.id}  [${b.component}]  ${clip(b.summary, 74)}`);
+  }
+  if (gaps.length > 20) p(`  ... and ${gaps.length - 20} more`);
+  p('');
+  p(`# All ${cl.curated.length}, with per-bug diff evidence:  node scripts/wpt-bugs.js`);
+  p('');
+  p(`# Census of all ${cl.total} fixed bugs, by component. The keyword list above is a subset;`);
+  p('# these are how you reach the rest.');
+  for (const c of cl.census.slice(0, censusTop)) {
+    p(`  ${String(c.count).padStart(5)}  ${c.key}`);
+  }
+  if (cl.census.length > censusTop) {
+    p(`  ... and ${cl.census.length - censusTop} more component(s) — wpt-bugs.js --census for all`);
+  }
+  p('');
+  return L;
+}
+
+const SHOW_BUG = 'https://bugzilla.mozilla.org/show_bug.cgi?id=';
+
+/** One box per developer-facing bug, so the cross-check is a gate rather than a suggestion. */
+function bugGapBoxes(cl) {
+  if (!cl || !cl.ok) return [];
+  return cl.curated.map((b) => ({ path: bugBoxPath(b.id), bug: b }));
+}
+
+/**
+ * The worksheet's fourth list. Ordered gaps-first, matching the report, because a bug the
+ * diff cannot show is the one a reader is least equipped to answer from the artifact.
+ */
+function bugChecklistLines(cl) {
+  const boxes = bugGapBoxes(cl);
+  if (!boxes.length) return [];
+  const L = [];
+  const p = (s = '') => L.push(s);
+  const gaps = boxes.filter((b) => !b.bug.hits.length).length;
+  p('');
+  p(`## Developer-facing bugs in this release (${boxes.length})`);
+  p('');
+  p(`Mozilla flagged these ${boxes.length} bugs as needing developer documentation for`);
+  p(`${cl.milestone}, out of ${cl.total} fixed. ${gaps} have no matching evidence in the diff.`);
+  p('');
+  p('**FIXED does not mean enabled.** A bug can be fixed for this release and still be behind');
+  p('a pref, so its WPT tests fail in BOTH runs and that failure is CORRECT. Check before');
+  p('writing anything up — "landed, not enabled" is a "not a feature:" verdict.');
+  p('');
+  p('What this list is for, from the pass that added it:');
+  p('  bug 2019332  RTCIceTransport.getSelectedCandidatePair() — WAS in the diff, as newly-');
+  p('               passing IDL subtests, and still absent from the notes. A cross-check.');
+  p('  bug 1850288  Show path in JSON Viewer — DevTools has no WPT coverage at all, so');
+  p('               nothing else here will ever mention it.');
+  p('  bug 2048183  :open for <select> — FIXED, but behind a pref: its tests still fail in');
+  p('               both runs, which is CORRECT. "landed, not enabled" is not a feature.');
+  p('');
+  p('Verdicts work as everywhere else. "not a feature:" is the right answer for a bug that');
+  p('is real but not web-facing — a DevTools or build change — and saying so is the point.');
+  p('');
+  for (const box of boxes) {
+    const f = bugFinding(box.bug);
+    p(`[ ] ${box.path}   (${f.short})`);
+    p(`      ${clip(box.bug.summary, 92)}`);
+    p(`      ${box.bug.product}/${box.bug.component}`);
+    for (const line of f.lines) p(`      ${line}`);
+    p(`      ${SHOW_BUG}${box.bug.id}`);
+  }
+  return L;
+}
+
+// ---------------------------------------------------------------------------
 // report.txt — the ranked view, plus the two sections that ranking would hide
 // ---------------------------------------------------------------------------
 
@@ -607,6 +799,8 @@ function renderReport(report, { top = 40 } = {}) {
     }
     p('');
   }
+
+  for (const line of changelogLines(report.changelog)) p(line);
 
   if (report.vocabulary && report.vocabulary.length) {
     p('## One feature, several directories (shared newly-passing subtest words)');
@@ -995,6 +1189,7 @@ function renderChecklist(report, tests, { dir = '' } = {}) {
   }
 
   for (const line of jsChecklistLines(report.jsHorizon)) p(line);
+  for (const line of bugChecklistLines(report.changelog)) p(line);
   return L;
 }
 
@@ -1669,4 +1864,5 @@ module.exports = {
   groupByDir, evidenceLines, opaquelyNamed, positionalName, positionalSubtests,
   messageNamesSomething, CATEGORIES, jsBoxPath, jsGapBoxes, jsHorizonLines,
   jsChecklistLines, jsFinding, jsFyiLines, jsUpstreamLines,
+  changelogLines, bugChecklistLines, bugGapBoxes, bugFinding, bugBoxPath,
 };
