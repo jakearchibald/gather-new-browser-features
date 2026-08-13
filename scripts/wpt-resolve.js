@@ -133,7 +133,20 @@ if (opts.list) {
   const blocks = [];
   for (const line of text.split('\n')) {
     const m = line.match(BOX_OPEN);
-    if (m) blocks.push({ lines: [`${m[1]}${m[2] ? `   #${m[2].replace(/\s+/g, ' ')}` : ''}`] });
+    if (!m) continue;
+    // The key ALONE on its own line, and any note indented beneath it.
+    //
+    // These used to share a line as `<key>   # <note>`, and for a `?query` box the note is
+    // `[reach it with: --grep <fragment>]`. That reads as an instruction, because the
+    // surrounding doctrine is "never pass a ?query path, use --grep instead" — so one pass
+    // submitted the --grep fragment as the key for one box while correctly keeping `?rest` on
+    // another, in the same file. The cue was fighting the doctrine, and the adjacency is what
+    // made it ambiguous. The note is still worth having (it is how you read the test before
+    // verdicting it), just not on the line being copied.
+    const note = m[2].replace(/\s+/g, ' ').trim();
+    const lines = [m[1]];
+    if (note) lines.push(`    # ^ that line is the key. Context: ${note}`);
+    blocks.push({ lines });
   }
   if (!blocks.length) {
     console.log('Every box already has a verdict. Check the gate:');
@@ -141,10 +154,9 @@ if (opts.list) {
     process.exit(0);
   }
   console.log(`# ${blocks.length} box(es) with no verdict yet, in ${artifact.rel(paths.checklist)}`);
-  // "Use these EXACTLY as keys" sat directly above lines that are not usable as-is, which
-  // reads as a contradiction. Lead with where the key ends.
-  console.log('# The key is everything BEFORE the "   #" — that part is a comment, not part of');
-  console.log('# the key. Copy the key exactly: a typo matches no box and writes nothing.');
+  console.log('# One key per un-indented line, copied EXACTLY — including any ?query, which IS');
+  console.log('# part of the key. Indented "#" lines are context, never keys. A --grep fragment');
+  console.log('# shown as context is how to READ that test; it is not the key.');
   console.log('');
   for (const line of page.render(blocks, {
     part: opts.part,

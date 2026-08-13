@@ -541,13 +541,25 @@ function checklistChecks() {
   });
 
   check('gate: a wrong verdict kind is named, and the closed set is listed', () => {
-    // `regression:` is the natural fourth kind to reach for — one pass wrote it four times.
-    const r = verifyChecklist(sheet('[x] /a  — regression: cookieStore.set returned deleted'));
+    // `regression:` used to be the example here and is now a valid kind, so this needs a
+    // prefix that genuinely is not one — the property under test is that the gate quotes what
+    // it refused and lists what it will take.
+    const r = verifyChecklist(sheet('[x] /a  — investigated: cookieStore.set returned deleted'));
     if (r.bad.length !== 1) return `expected 1 bad, got ${r.bad.length}`;
     const why = r.bad[0].why;
-    if (!/"regression:"/.test(why)) return `did not quote the offending prefix: ${why}`;
-    return /written up:/.test(why) && /not a feature:/.test(why)
-      ? null : `did not list the valid kinds: ${why}`;
+    if (!/"investigated:"/.test(why)) return `did not quote the offending prefix: ${why}`;
+    for (const kind of ['written up:', 'regression:', 'not a feature:']) {
+      if (!why.includes(kind)) return `did not list ${kind}: ${why}`;
+    }
+    return null;
+  });
+
+  check('gate: "regression:" is a verdict kind, not a rejection', () => {
+    // Two independent passes reached for it — once four times, once about fifteen — after
+    // following the instruction to write `written up:` instead. It means the same thing to the
+    // gate and carries more information, since the notes have a Regressions section.
+    const r = verifyChecklist(sheet('[x] /css/css-transforms  — regression: four transform reftests now fail'));
+    return r.bad.length === 0 ? null : `rejected a regression verdict: ${whys(r)}`;
   });
 
   check('gate: a churn directory needs no verdict', () => {
@@ -1398,6 +1410,41 @@ function outputSizeChecks(dir) {
       }
     }
     return offenders.length ? offenders.join('\n      ') : null;
+  });
+
+  // A filtered read must lead with its OWN side. Asking for still-failing and being shown a
+  // 144x rollup of FIXES as the first substantive line nearly produced a misattribution.
+  check('--only leads with the requested category, and labels the other side', () => {
+    const diff = JSON.parse(fs.readFileSync(path.join(dir, 'diff.json'), 'utf8'));
+    // A file with many fixes and few still-failing is where the trap lives.
+    const target = diff.tests
+      .filter((t) => t.subtests && t.subtests.counts.newlyPassing > 20
+        && t.subtests.counts.stillFailing > 0
+        && t.subtests.counts.stillFailing < 5)
+      .sort((a, b) => b.subtests.counts.newlyPassing - a.subtests.counts.newlyPassing)[0];
+    if (!target) return null;
+    const out = run('wpt-subtests.js', [dir, target.test, '--only', 'still-failing']);
+    const fixesAt = out.indexOf('dominant fixes message');
+    if (fixesAt === -1) return null;   // no cross-side rollup to mislabel
+    const warnAt = out.indexOf('NOT WHAT YOU ASKED FOR');
+    if (warnAt === -1 || warnAt > fixesAt) {
+      return 'a fixes rollup was shown under --only still-failing with no warning above it';
+    }
+    return null;
+  });
+
+  // A key that shares its line with a "[reach it with: --grep ...]" note was read as an
+  // instruction, because the surrounding doctrine says never to pass a ?query path. One pass
+  // submitted the --grep fragment as a key for one box and kept ?rest on another, in one file.
+  check('wpt-resolve.js --list puts the key alone on its line', () => {
+    const out = run('wpt-resolve.js', [dir, '--list']);
+    if (/box\(es\) with no verdict/.test(out) === false) return null;   // nothing open
+    for (const line of out.split('\n')) {
+      if (/^\S/.test(line) && !line.startsWith('#') && !line.startsWith('!!')) {
+        if (/\s#|\[reach it with/.test(line)) return `a key line carries a note: ${line.slice(0, 90)}`;
+      }
+    }
+    return null;
   });
 
   // Paging is only honest if the pages tile. A view that pages but drops or repeats

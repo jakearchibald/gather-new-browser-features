@@ -1334,8 +1334,16 @@ function boxPaths(text) {
 // match how a verdict defers, not any word that sounds vague.
 const NON_ANSWER = /\b(see notes?|see above|see below|as above|as described|as discussed|various|miscellaneous|tbd|todo|n\/a)\b/i;
 
-// The three verdict kinds, however they are punctuated.
-const VERDICT_KIND = /\b(written[ -]up|explained|not[ -]a[ -]feature|churn)\b/i;
+// The verdict kinds, however they are punctuated.
+//
+// `regression:` earns its place rather than diluting the vocabulary. Two independent passes
+// reached for it — once four times, once about fifteen — after following the instruction to
+// use `written up:` instead, and both reported the same reason: "written up" does double duty
+// as "this is a feature" and "this is in the notes", so a regression verdict reads wrong even
+// when it is right. It also carries information the notes already need, since they have a
+// separate Regressions section, so `regression:` is strictly more informative than the
+// `written up:` it replaces. It means the same thing to the gate.
+const VERDICT_KIND = /\b(written[ -]up|regression|explained|not[ -]a[ -]feature|churn)\b/i;
 
 // Words too generic to be a reference to anything.
 const STOPWORDS = new Set(`same feature features cause causes group grouped groups
@@ -1482,9 +1490,9 @@ function verifyChecklist(text, expected = null) {
       const first = (b.verdict.match(/^\s*([a-z][a-z -]{0,20}?):/i) || [])[1];
       bad.push({
         line: b.line,
-        why: (first ? `"${first}:" is not one of the three kinds. ` : 'verdict names no kind. ')
-          + 'Use exactly one of "written up:", "explained:" or "not a feature:" — a bug or a '
-          + 'regression you are reporting is "written up:"',
+        why: (first ? `"${first}:" is not one of the verdict kinds. ` : 'verdict names no kind. ')
+          + 'Use exactly one of "written up:", "regression:", "explained:" or '
+          + '"not a feature:" — "regression:" is for one you are reporting as a regression',
       });
       continue;
     }
@@ -1609,14 +1617,36 @@ function renderFile(report, r, { limit = 0, match = null, matchLabel = null, onl
   // Both directions get a rollup. A dominant shape among the FIXES means one bug
   // was fixed and unblocked many tests; a dominant shape among what STILL FAILS
   // names the limitation precisely, which is the other half of an honest note.
-  for (const [label, list, note] of [
-    ['fixes', st.newlyPassing, 'ONE bug fixed unblocking many tests — not many separate fixes'],
-    ['still-failing', st.stillFailing, 'ONE remaining limitation, not many scattered failures'],
-  ]) {
+  //
+  // Ordered so a filtered read gets its OWN side first. With `--only still-failing` on
+  // color-valid-color-mix-function.html the still-failing rollup is skipped (one subtest, no
+  // repeat) and the 144x FIXES rollup was the first substantive thing on screen — a reader
+  // who asked for failures nearly attributed it to them. Requested category first, the other
+  // side labelled as the other side, and a requested category with no dominant message says
+  // so rather than vanishing.
+  const rollups = [
+    ['fixes', 'newly-passing', st.newlyPassing,
+      'ONE bug fixed unblocking many tests — not many separate fixes'],
+    ['still-failing', 'still-failing', st.stillFailing,
+      'ONE remaining limitation, not many scattered failures'],
+  ];
+  if (only) rollups.sort((a, b) => (only.has(b[1]) ? 1 : 0) - (only.has(a[1]) ? 1 : 0));
+  for (const [label, category, list, note] of rollups) {
+    const requested = !only || only.has(category);
     const rollup = messageRollup(list);
-    if (!rollup.length || rollup[0].count < 2) continue;
+    if (!rollup.length || rollup[0].count < 2) {
+      if (only && requested && list.length) {
+        p('');
+        p(`  no dominant ${label} message — ${list.length} subtest(s), no repeated message.`);
+      }
+      continue;
+    }
     const share = `${rollup[0].count}/${list.length}`;
     p('');
+    if (!requested) {
+      p(`  NOT WHAT YOU ASKED FOR: the rollup below is the ${category} side, which --only`);
+      p(`  filtered out. Do not read it as ${[...only].join('/')}.`);
+    }
     p(`  dominant ${label} message (${share}) — if this accounts for most of them, that is`);
     p(`  ${note}:`);
     for (const { message, count } of rollup.slice(0, 4)) {

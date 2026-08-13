@@ -212,15 +212,17 @@ resolved. Replace the box with `[x]`/`(x)` and append `" — <verdict>"`, one of
 
 ```
 [x] /css/css-values/tree-counting  — written up: sibling-index() / sibling-count()
+[x] /css/css-transforms            — regression: four transform reftests now fail
 [x] /css/css-images                — explained: sibling-index() in gradients (tree-counting)
 [x] /fs                            — not a feature: flake, same subtest moved the other
                                      way in the worker variant of the same file
 ```
 
-**The three verdict kinds are a closed set** — `written up:`, `explained:`, `not a feature:`
-and nothing else. `regression:` is the natural fourth to reach for and is rejected; a bug or
-regression that goes in the notes is `written up:`, which means "this is in the notes", not
-"this is a feature". The gate names the offending prefix when it refuses one.
+**The verdict kinds are a closed set** — `written up:`, `regression:`, `explained:`,
+`not a feature:` and nothing else. `written up:` and `regression:` mean the same thing to the
+gate ("this is in the notes"); use `regression:` when it is one, because the notes have a
+separate Regressions section and the verdict is then the sorting key. The gate names the
+offending prefix when it refuses one.
 
 **Apply the verdicts as data, not as edits.** Three steps:
 
@@ -475,6 +477,12 @@ a file's importance, not a reason to sample it. A `sed` range is worse still, be
 fails quietly: nearly every subtest name in `color-computed-color-mix-function.html`
 contains `color-mix`, so a `/color-mix/,/^====/p` range restarts on almost every line and
 silently drops the header, the section titles and the synopsis.
+
+**The synopsis always reports the file's true totals, including the side you filtered out.**
+With `--only`, the requested category's rollup comes first and anything from the other side is
+labelled `NOT WHAT YOU ASKED FOR` — because on `color-valid-color-mix-function.html --only
+still-failing` the one still-failing subtest has no dominant message, so a `144x` *fixes*
+rollup was the first substantive thing on screen and was nearly read as the failure cause.
 
 **Bound a read by meaning instead, with `--match` or `--only`.** `--match` filters on name
 and message; `--only newly-passing` (also `newly-failing`, `changed`, `removed`,
