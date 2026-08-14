@@ -520,7 +520,7 @@ function prefGatingLines(g) {
   p('# makes every nightly-only pref look shipped.');
   p(`# ${gated} forward-moving test(s) are gated by a pref a beta/release user does not have.`);
   p('');
-  for (const verdict of ['nightly-only', 'off-by-default', 'channel-dependent', 'unclear', 'unknown-pref', 'shipped']) {
+  for (const verdict of ['nightly-only', 'off-by-default', 'platform-split', 'channel-dependent', 'unclear', 'unknown-pref', 'shipped']) {
     const list = byVerdict[verdict];
     if (!list || !list.length) continue;
     p(`  ${VERDICT_LABEL[verdict]} (${list.length})${discount(verdict) ? '  <- DISCOUNT these' : ''}:`);

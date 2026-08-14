@@ -1245,6 +1245,36 @@ Temporal
     return null;
   });
 
+  check('prefs: a channel macro inside a PLATFORM #if still counts as gating', () => {
+    // dom.clipboard.customFormatSupport.enabled is `false` on Android and `@IS_NIGHTLY_BUILD@`
+    // on desktop: two branches, and no channel *condition* around them. Only single-branch
+    // macros were resolved, and only a channel #if counted as gating, so a plainly
+    // nightly-only pref came out "unclear".
+    const yaml = [
+      '- name: a.split.enabled', '  type: bool',
+      '#ifdef ANDROID', '  value: false', '#else', '  value: @IS_NIGHTLY_BUILD@', '#endif',
+      '  mirror: always',
+    ].join('\n');
+    const info = PR.parseStaticPrefList(yaml).get('a.split.enabled');
+    if (!info.gated) return `a channel macro under a platform #if was not gating: ${JSON.stringify(info)}`;
+    return PR.verdictFor({ 'mozilla-central': info, 'mozilla-beta': info, 'mozilla-release': info }) === 'nightly-only'
+      ? null : 'it did not resolve to nightly-only';
+  });
+
+  check('prefs: a platform split is neither shipped nor nightly-only', () => {
+    // `network.http.happy_eyeballs_enabled` is `@IS_NIGHTLY_BUILD@` on Android and `true`
+    // elsewhere. Collapsing that to nightly-only tells the reader desktop users do not have it,
+    // which is as wrong as calling it shipped — it needs a sentence naming the platforms.
+    const split = { nightly: true, shipped: true, raw: '@IS_NIGHTLY_BUILD@ | true', gated: true };
+    const gatedOnly = { nightly: true, shipped: false, raw: '@IS_NIGHTLY_BUILD@', gated: true };
+    const v = PR.verdictFor({
+      'mozilla-central': split, 'mozilla-beta': gatedOnly, 'mozilla-release': gatedOnly,
+    });
+    if (v !== 'platform-split') return `expected platform-split, got ${v}`;
+    // It ships somewhere, so it must NOT be swept up by the discount rule.
+    return PR.discount('platform-split') ? 'a platform split was discounted wholesale' : null;
+  });
+
   check('prefs: an outdated resolver is called out, not silently trusted', () => {
     // A stale searchfox-cli is the same class of silent weakness as a missing one: if an older
     // release resolved `-R mozilla-beta` differently, every pref verdict would be wrong with

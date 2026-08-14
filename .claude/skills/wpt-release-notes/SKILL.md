@@ -488,6 +488,7 @@ inventory and on the worksheet box:
 | *(none)* | Nothing here is pref-gated. Write it up normally. |
 | `NIGHTLY-ONLY` | On in nightly, off for beta/release. **Discount.** Verdict: `not a feature: nightly-only (<pref>)`. |
 | `OFF by default everywhere` | Off in *every* channel including nightly; the test only passes because WPT forced it. **Discount.** |
+| `on by default on SOME platforms only` | A platform split — e.g. `@IS_NIGHTLY_BUILD@` on Android, `true` elsewhere. **Write it up and name the platforms**; neither "available" nor "nightly-only" is true of it, and this is not a discount. Then check for **sibling** prefs gating part of the feature. |
 | `channel-dependent value` / `pref state unclear` / `pref not found` | Could not be resolved. Treat as a lead, check the pref by hand, and do not present it as available. |
 
 The pref-to-directory association is a **lead**, matched on whole path segments — it named the

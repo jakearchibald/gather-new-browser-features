@@ -141,25 +141,35 @@ function parseStaticPrefList(text) {
     // No branches recorded (shouldn't happen) -> unknown.
     if (!seen.length) { out.set(name, { nightly: null, shipped: null, raw: null, gated: false }); }
     else {
-      const gated = seen.some((v) => v.gated);
+      // Resolve every branch, then combine. A channel macro is gating wherever it appears —
+      // including inside a PLATFORM #if, which is the case that was wrong:
+      // dom.clipboard.customFormatSupport.enabled is `false` on Android and
+      // `@IS_NIGHTLY_BUILD@` on desktop, so it has two branches and no channel *condition*,
+      // and it resolved to "unclear" for a plainly nightly-only pref.
+      const resolved = seen.map((v) => {
+        const macro = (v.value.match(/^@(\w+)@$/) || [])[1];
+        if (macro && CHANNEL_MACROS[macro]) return { ...CHANNEL_MACROS[macro], macro: true };
+        if (/^(true|false)$/.test(v.value)) {
+          const b = v.value === 'true';
+          return { nightly: b, shipped: b, macro: false };
+        }
+        return { nightly: null, shipped: null, macro: false };
+      });
+      const gated = seen.some((v) => v.gated) || resolved.some((r) => r.macro);
       let nightly = null;
       let shipped = null;
-      if (seen.length === 1 && !seen[0].gated) {
-        const macro = (seen[0].value.match(/^@(\w+)@$/) || [])[1];
-        if (macro && CHANNEL_MACROS[macro]) {
-          ({ nightly, shipped } = CHANNEL_MACROS[macro]);
-        } else if (/^(true|false)$/.test(seen[0].value)) {
-          nightly = seen[0].value === 'true';
-          shipped = nightly;
-        }
+      // Unambiguous only when every branch agrees. Any branch on nightly with none shipped is
+      // still a clear answer: nobody on a shipped channel gets it, whatever the platform.
+      const known = resolved.filter((r) => r.nightly !== null);
+      if (known.length === resolved.length && known.length) {
+        nightly = known.some((r) => r.nightly);
+        shipped = known.some((r) => r.shipped);
       }
-      const macroGated = seen.length === 1 && !!(seen[0].value.match(/^@(\w+)@$/)
-        && CHANNEL_MACROS[(seen[0].value.match(/^@(\w+)@$/) || [])[1]]);
       out.set(name, {
         nightly,
         shipped,
         raw: seen.map((v) => v.value).join(' | '),
-        gated: gated || macroGated,
+        gated,
       });
     }
     name = null;
@@ -317,6 +327,14 @@ function verdictFor(per) {
   const onInNightly = central ? central.nightly !== false : true;
   const offWhenShipped = shippedRepos.some((i) => i.gated || i.shipped === false);
   const onWhenShipped = shippedRepos.filter((i) => i.shipped === true && !i.gated);
+
+  // Gated on some platforms and shipped on others. `network.http.happy_eyeballs_enabled` is
+  // `@IS_NIGHTLY_BUILD@` on Android and `true` everywhere else, so desktop users DO have it —
+  // calling that nightly-only is as wrong as calling it shipped, just in the other direction.
+  // It needs a sentence naming the platforms, not a discount.
+  const platformSplit = all.some((i) => i.gated && i.shipped === true);
+  if (platformSplit) return 'platform-split';
+
   if (offWhenShipped && !onWhenShipped.length && onInNightly) return 'nightly-only';
   if (!gated && onWhenShipped.length && onWhenShipped.length === shippedRepos.length) {
     return 'shipped';
@@ -327,12 +345,15 @@ function verdictFor(per) {
 
 /** Does this verdict mean a user of the shipped channel does NOT have the feature? */
 function discount(verdict) {
-  return verdict !== 'shipped';
+  // A platform split ships somewhere, so it is not discountable wholesale — it needs a
+  // sentence naming the platforms.
+  return verdict !== 'shipped' && verdict !== 'platform-split';
 }
 
 /** A short, accurate phrase per verdict, for the inventory and worksheet markers. */
 const VERDICT_LABEL = {
   shipped: 'on by default',
+  'platform-split': 'on by default on SOME platforms only',
   'nightly-only': 'NIGHTLY-ONLY',
   'off-by-default': 'OFF by default everywhere',
   'channel-dependent': 'channel-dependent value',
