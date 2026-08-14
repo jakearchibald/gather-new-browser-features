@@ -82,8 +82,11 @@ it has no `--exclude` at all: an earlier default of `/third_party` hid the whole
 never under a web-platform directory.
 
 **But reading it all still cannot find a JavaScript feature that was never tested here**,
-and that is not a hypothetical: WPT *vendors* test262 rather than tracking it, re-pinning
-the upstream revision by hand every few months. One Firefox comparison ran against a
+and that is not a hypothetical: WPT *vendors* test262 rather than tracking it. The re-pin was
+every few months and became weekly in August 2026, so the size of the gap is measured per
+comparison rather than assumed — and a snapshot that changes *between* the two runs is
+handled as its own case, since those tests exist on one side only and would otherwise be
+pre-resolved as churn. One Firefox comparison ran against a
 117-day-old snapshot, so the three TC39 Iterator proposals that release shipped —
 `Iterator.prototype.chunks`/`.windows`, `.includes` and `.join` — had **zero tests on either
 side**. Every tool correctly found nothing, including `wpt-state.js`, and the notes named

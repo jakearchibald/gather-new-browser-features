@@ -316,9 +316,21 @@ directory names (`intl402/Locale/prototype/getTimeZones`,
 `language/expressions/dynamic-import`) rather than skimming past it.
 
 **…but reading that block to the last line is still not enough, and this is the one gap
-reading cannot close.** WPT *vendors* test262 rather than tracking it, re-pinning the
-upstream revision by hand every few months, so a feature whose test262 tests landed past
-that pin has **no test in either run**. Firefox 154 shipped Iterator Chunking, Includes and
+reading cannot close.** WPT *vendors* test262 rather than tracking it, so a feature whose
+test262 tests landed past the pin has **no test in either run**. The cadence is changing —
+it was every few months (117 days stale on the 153→154 diff, which cost three features) and
+became weekly in August 2026 — so **check the number the collector prints rather than
+assuming either**. Both states are handled, and they surface differently:
+
+- **A stale snapshot** produces `test262-feature:` boxes for flags with no test on either
+  side. That is the case the rest of this section describes.
+- **A current snapshot** produces none, and the report says "coverage is current" — worth
+  reading rather than skipping, because it is a positive result, not a silence.
+- **A snapshot that changed *between* the two runs** — which weekly re-vendoring makes the
+  norm for any release-to-release diff — is the opposite case: those tests *do* exist, in the
+  after run only, so they classify as `added` and the directory worksheet pre-resolves them
+  as churn. Their boxes say `tests are NEW in the after run` and the source is already
+  cached, so read it locally. A whole proposal's tests arriving is a lead, not churn. Firefox 154 shipped Iterator Chunking, Includes and
 Join into a 117-day-old snapshot; `wpt-grep.js Iterator` and `wpt-state.js --grep
 Iterator/prototype/chunks` both correctly found nothing, and the notes named none of them.
 Unlike every other miss here, the tooling's silence is indistinguishable from the feature

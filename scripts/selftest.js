@@ -675,7 +675,7 @@ async function horizonChecks() {
   } = require(path.join(SCRIPTS, 'lib', 'test262.js'));
   const {
     jsGapBoxes, jsChecklistLines, boxPaths, verifyChecklist, jsFinding, jsFyiLines,
-    jsUpstreamLines,
+    jsUpstreamLines, jsHorizonLines, jsHorizonCaveat,
   } = require(path.join(SCRIPTS, 'lib', 'render.js'));
   // Both renderers read a block off the horizon, so wrap a bare block for the checks that
   // only care about one finding's wording.
@@ -1288,6 +1288,54 @@ Temporal
     }
     // The gap must sort before the matched one: it is the one nothing else will mention.
     return paths[0] === 'bug:2048183' ? null : `gaps did not sort first: ${paths.join(',')}`;
+  });
+
+  // WPT re-vendored test262 on 2026-08-13 and is moving to a weekly cadence, which changes
+  // which of these paths is the common one. The 117-day snapshot made `missing` the normal
+  // case and `revendored` almost unreachable; weekly makes `missing` usually empty and
+  // `revendored` the norm for any release-to-release diff, since it will straddle a re-vendor.
+  check('horizon: a current snapshot produces no boxes and says coverage is current', () => {
+    const h = {
+      ok: true, sameSnapshot: true, lagDays: 4,
+      after: { rev: 'be13516fb6441b950ba8a3df97eb34062c186972', date: '2026-08-07T06:18:20Z' },
+      before: { rev: 'be13516fb6441b950ba8a3df97eb34062c186972' },
+      upstream: { date: '2026-08-10T19:21:58Z' },
+      missing: [], revendored: [],
+    };
+    if (jsGapBoxes(h).length) return 'a current snapshot produced gap boxes';
+    if (jsChecklistLines(h).length) return 'a current snapshot produced a worksheet section';
+    // Strip the leading "#" of each comment line before joining, or it lands between the
+    // words of any phrase that wraps.
+    const text = jsHorizonLines(h).map((l) => l.replace(/^#\s?/, '')).join(' ');
+    if (!/coverage is current/.test(text)) return `the report did not say coverage is current: ${text.slice(-160)}`;
+    // And the inventory must not carry a caveat about gaps that do not exist.
+    return jsHorizonCaveat(h).length === 0
+      ? null : 'the inventory still warned about a horizon with no gaps';
+  });
+
+  check('horizon: a re-vendored flag is NOT labelled "no test here"', () => {
+    // The two classes are opposites and shared one label. `missing` has no test in either
+    // run; `revendored` has tests in the after run only, and calling that "no test here" is
+    // false — harmless while re-vendoring was twice a year, wrong once it is weekly.
+    const h = {
+      ok: true, sameSnapshot: false, lagDays: 7,
+      after: { rev: 'bbbbbbbbbbbb' }, before: { rev: 'aaaaaaaaaaaa' },
+      missing: [{ name: 'brand-new-flag' }],
+      revendored: [{ name: 'iterator-chunking' }],
+    };
+    const boxes = jsGapBoxes(h);
+    const kinds = Object.fromEntries(boxes.map((b) => [b.feature.name, b.kind]));
+    if (kinds['brand-new-flag'] !== 'missing') return 'a missing flag was not tagged missing';
+    if (kinds['iterator-chunking'] !== 'revendored') return 'a re-vendored flag was not tagged';
+    const lines = jsChecklistLines(h);
+    const boxLines = lines.filter((l) => l.startsWith('[ ]'));
+    const rev = boxLines.find((l) => l.includes('iterator-chunking'));
+    const mis = boxLines.find((l) => l.includes('brand-new-flag'));
+    if (/no test here/.test(rev)) return `a re-vendored box claims "no test here": ${rev}`;
+    if (!/no test here/.test(mis)) return `a missing box lost its label: ${mis}`;
+    // And the section must tell the reader the sources are already cached locally.
+    return /wpt-subtests\.js|wpt-fetch-tests\.js/.test(lines.join(' '))
+      ? null : 'no local read offered for re-vendored flags';
   });
 
   check('horizon: a failed or absent check never renders as "no gaps"', () => {

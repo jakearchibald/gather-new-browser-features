@@ -430,7 +430,8 @@ function jsHorizonLines(h) {
 
   if (h.revendored && h.revendored.length) {
     p('');
-    p(`# ${h.revendored.length} flag(s) arrived BETWEEN the two runs (test262 was re-vendored). Their`);
+    p(`# ${h.revendored.length} flag(s) arrived BETWEEN the two runs (test262 was re-vendored), so unlike`);
+    p('# the list above their tests DO exist — in the after run only. Their');
     p('# tests exist on one side only, so they classify as `added` and the worksheet');
     p('# pre-resolves them as test-suite churn — true about the mechanism, and wrong');
     p('# about the consequence: a whole proposal\'s tests arriving is a lead, and this');
@@ -1208,17 +1209,30 @@ function jsChecklistLines(h) {
   const L = [];
   const p = (s = '') => L.push(s);
   p('');
-  p(`## JavaScript features with no test here (${jsGaps.length})`);
+  const nMissing = jsGaps.filter((b) => b.kind === 'missing').length;
+  const nRevendored = jsGaps.length - nMissing;
+  p(`## JavaScript features the diff cannot show normally (${jsGaps.length})`);
   p('');
-  p('WPT vendors test262 rather than tracking it. This comparison\'s snapshot is');
-  p(`tc39/test262 @ ${h.after.rev.slice(0, 10)}${h.lagDays === null ? '' : `, ${h.lagDays} days behind upstream`}, so every flag below is one`);
-  p('upstream declares and this snapshot does not — a PROOF that neither run holds a');
-  p('single test for it, not a guess. So the diff, the inventory, the ranked report');
-  p('and wpt-state.js are all silent about these, and that silence looks exactly like');
-  p('the feature not shipping.');
-  p('');
-  p('Firefox 154 shipped Iterator Chunking, Iterator Includes and Iterator Join into');
-  p('a 117-day-old snapshot. All three were invisible and all three were missed.');
+  p('WPT vendors test262 rather than tracking it, so the JS half of a run has a horizon.');
+  p(`This comparison's snapshot is tc39/test262 @ ${h.after.rev.slice(0, 10)}${h.lagDays === null ? '' : `, ${h.lagDays} days behind upstream`}.`);
+  if (nMissing) {
+    p('');
+    p(`${nMissing} flag(s) are declared upstream and NOT in this snapshot — a PROOF that neither`);
+    p('run holds a single test for them, not a guess. The diff, the inventory, the ranked');
+    p('report and wpt-state.js are all silent, and that silence looks exactly like the');
+    p('feature not shipping. Firefox 154 shipped Iterator Chunking, Includes and Join into a');
+    p('117-day-old snapshot; all three were invisible and all three were missed.');
+  }
+  if (nRevendored) {
+    p('');
+    p(`${nRevendored} flag(s) arrived BETWEEN the two runs, because test262 was re-vendored. Those`);
+    p('are the opposite case: their tests DO exist, in the after run only, so they classify as');
+    p('`added` and the directory worksheet pre-resolves them as test-suite churn. True about');
+    p('the mechanism, wrong about the consequence — a whole proposal\'s tests arriving is a');
+    p('lead. Read them locally; the source is already cached:');
+    p('  node scripts/wpt-subtests.js --grep <flag-ish fragment>');
+    p('  node scripts/wpt-fetch-tests.js --grep <fragment> --head 0');
+  }
   p('');
   // The Bugzilla answer, printed here rather than left as an exercise. The previous
   // version of this section said "look the flag up in Bugzilla", and that produced a
@@ -1277,7 +1291,8 @@ function jsChecklistLines(h) {
   p('');
   for (const box of jsGaps) {
     const finding = jsFinding(h, box.feature.name);
-    p(`[ ] ${box.path}   (no test here${finding ? `; ${finding.short}` : ''})`);
+    const where = box.kind === 'revendored' ? 'tests are NEW in the after run' : 'no test here';
+    p(`[ ] ${box.path}   (${where}${finding ? `; ${finding.short}` : ''})`);
     const bits = [box.feature.label, box.feature.section].filter(Boolean).join(' / ');
     if (bits) p(`      ${bits}`);
     if (box.feature.url) p(`      ${box.feature.url}`);
@@ -1304,11 +1319,19 @@ function jsGapBoxes(h) {
   if (!h || !h.ok) return [];
   const boxes = [];
   const seen = new Set();
-  for (const feature of [...h.missing, ...(h.revendored || [])]) {
-    const path = jsBoxPath(feature.name);
-    if (seen.has(path)) continue;
-    seen.add(path);
-    boxes.push({ path, feature });
+  // Tagged, because the two classes are opposites and were sharing one label. A `missing`
+  // flag has no test in EITHER run; a `revendored` one has tests in the after run only. Both
+  // need a box, but "no test here" is true of the first and false of the second — a
+  // mislabelling that only stayed harmless while WPT re-vendored test262 twice a year. It is
+  // now on a weekly cadence, so straddling a re-vendor is the normal case for any
+  // release-to-release diff, and `revendored` becomes the common class rather than the rare one.
+  for (const [kind, list] of [['missing', h.missing], ['revendored', h.revendored || []]]) {
+    for (const feature of list) {
+      const path = jsBoxPath(feature.name);
+      if (seen.has(path)) continue;
+      seen.add(path);
+      boxes.push({ path, feature, kind });
+    }
   }
   return boxes;
 }
@@ -1893,6 +1916,6 @@ module.exports = {
   renderFiles, verifyChecklist, boxPaths, verdictOf, grepFragment, collapseVariants,
   groupByDir, evidenceLines, opaquelyNamed, positionalName, positionalSubtests,
   messageNamesSomething, CATEGORIES, jsBoxPath, jsGapBoxes, jsHorizonLines,
-  jsChecklistLines, jsFinding, jsFyiLines, jsUpstreamLines,
+  jsChecklistLines, jsFinding, jsFyiLines, jsUpstreamLines, jsHorizonCaveat,
   changelogLines, bugChecklistLines, bugGapBoxes, bugFinding, bugBoxPath,
 };
