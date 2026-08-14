@@ -449,6 +449,33 @@ the summary says so, the box says so; where it doesn't, **check before writing a
 Each becomes a `bug:<id>` checklist box, and `not a feature:` is the right verdict for a real
 bug that is not web-facing, or that landed behind a pref. Saying so is the point.
 
+**An enablement TITLE is enough — no keyword needed.** The dev-doc keyword relies on someone
+remembering it; a title like `Enable QUIC v2 version negotiation on all channels` is written by
+the person landing the flip, because the title *is* the description of the flip. So every bug
+whose title starts `Ship`/`Enable`/`Set`/`Let`, or says `by default`, `for all users`, `on all
+channels`, `on release` or `ride the trains`, is boxed **when it is in `Core/*`** — the web
+platform — regardless of keywords. On one release that was 39 of 2570 titles, 18 in Core, and it
+was the only route to two features nothing else here could reach: QUIC v2 version negotiation and
+Happy Eyeballs v3, neither of which can ever have a WPT test. Enablement titles outside `Core/*`
+are listed as leads rather than boxed; they are overwhelmingly build, CI and Android-app work.
+
+For these boxes **absence of tests does not disqualify** — resolve from the pref evidence on the
+box, and never write `not a feature: no tests`. That exact verdict lost two WebAssembly proposals
+on a real pass, after the same pass had correctly worked out that WPT could not see them.
+
+Each box also carries its **controlling pref** where one could be resolved, with the value on each
+release train and a note when the trains disagree — because `mozilla-beta` can still be on the
+*previous* version, in which case its gate describes that version and not the one you are writing
+about:
+
+```
+controlling pref (candidate, 2 word(s) matched): javascript.options.wasm_compact_imports
+  central=true | false  beta=false  release=false
+  => ON for users. This IS news, tests or no tests.
+  note: mozilla-beta is still 154, so its gate describes 154, not 155; central has it
+        unconditionally, i.e. the flip landed in 155's cycle
+```
+
 **This is a lead, not coverage.** The keyword is applied by hand and is certainly
 incomplete: 21 of 3256. The other ~3235 are not discarded — they are stored whole and
 reachable by component or substring with no further network access, so the boundary is
@@ -460,6 +487,12 @@ Non-Firefox comparisons get `NOT APPLICABLE`, since Bugzilla milestones only des
 **By default, a feature that is not on for beta/release users does not go in the notes.**
 Include one only if you were explicitly asked to cover what is coming in nightly, and then
 say so in its own clearly-labelled section.
+
+**But do not let this rule swallow the opposite case.** "Gated" and "invisible" both read as
+"don't write it up", from opposite directions, and only one of them should. A pref-gating marker
+can only discount things that *appear* in the diff — a feature with no WPT files has no gated
+files either, and is not thereby discountable. No tests is a reason to go and find the pref
+(step 2b, and the no-coverage list in step 5), never a reason to drop something.
 
 This is not a nicety. The skill's most-suggested comparison is
 `--from firefox@beta --to firefox@nightly`, which is *exactly* where nightly-only features
@@ -640,13 +673,26 @@ changed: `text-decoration-inset: auto` had been computing to `NaN`, and all 21 s
 that one fix. `wpt-subtests.js` detects the pairing and says so, but "added" and "removed"
 mean churn only when the revisions *differ* — check which case you are in first.
 
-**A matching directory name is not evidence.** The trap is worst when you already hold a
-claim — a changelog entry, a bug, "did X ship?" — and a directory whose name matches it
-moved. A changelog said WebDriver *Perform Actions* now awaits action finalization, fixing
-races; both `perform_actions` directories had indeed moved `+1`. The newly-passing subtests
-were `test_move_to_inline_block_child` and `test_element_center_point_inline_block_child`,
-both failing on `assert 8 == 24.0 ± 1.0` — a coordinate bug for inline-block children, a
+**A pref flip IS the shipping event, not a non-event.** `Enable X on Release`, `Set X for all
+users`, `Let X ride the trains` are the *strongest possible* ship signals — they are the moment a
+feature becomes available. One pass made `Enable new CSS attr() on Release` a headline feature and,
+in the same document, discounted `Let svg.new-getBBox.enabled ride the trains` as "just a pref
+flip". Identical evidence, opposite conclusions. `--verify` now refuses `not a feature:` on an
+enablement box unless the verdict quotes a pref default or a source path, because the answer has
+to come from the pref list and never from the diff's silence.
+
+**A matching name is not evidence — at any level.** The classic form is a directory: a changelog
+said WebDriver *Perform Actions* now awaits action finalization, both `perform_actions`
+directories had moved `+1`, and the newly-passing subtests were `test_move_to_inline_block_child`
+failing on `assert 8 == 24.0 ± 1.0` — a coordinate bug for inline-block children, a
 different fix that happens to live in the same directory.
+
+The same trap one level down catches **file, interface and method names**. One pass matched a
+`getBBox()` pref-flip bug to `/svg/geometry` because both concern `getBBox()` — one is the
+`options` argument, the other non-rendered elements, unrelated behaviours sharing a method name.
+So the question is never "does this name match?" but "do the assertion messages describe *this*
+behaviour?" This sits in deliberate tension with searching broadly for candidates: cast wide to
+find evidence, then read the messages to confirm it is the right evidence.
 
 So the question is never "did this directory move?" but "do the assertion messages describe
 *this* behaviour?" Sometimes they match nearly word for word —
@@ -786,6 +832,14 @@ An entry in the notes reading "+1 `some-file.html`" with no feature named is not
 finding — it is an unresolved checklist line that got copied into prose. Two features were
 lost that way in one release.
 
+**State the scope, because it is not "everything that changed".** These notes cover what WPT
+tests, plus what the vendor's changelog surfaces — bugs Mozilla flagged `dev-doc-*` and bugs whose
+title describes an enablement event. Two classes fall outside both instruments and should be named
+as out of scope rather than implied absent: a feature that shipped with **no flip** (implemented
+directly on-by-default, or gated only by a build flag with no pref), and anything whose only record
+is an untitled internals change. Networking and graphics internals in particular need a separate
+pass over the census.
+
 Write to `release-notes/`, not `tmp/`, so deleting an artifact can't take the notes with
 it. Name the file after what was compared: `release-notes/firefox-153.md` for a
 version-to-version diff, `firefox-nightly-vs-beta.md` for a channel one. The directory is
@@ -870,7 +924,27 @@ not a footnote, and it is invisible unless you ask for it.
 
 Things with no WPT coverage at all. These are invisible in the diff — though the vendor
 changelog (step 2b) now reaches some of them, and `wpt-bugs.js --grep` is worth trying
-before concluding anything: rendering fixes with no reftest, "stopped working after several navigations"-style bugs, event *ordering* changes
+before concluding anything.
+
+**WebAssembly is the category most easily lost here, and it has been lost.** A wasm proposal is
+a binary-format or instruction-set change with *no JavaScript API surface*, so **no WPT test can
+ever observe it** — permanently, not as a lag. One pass wrote *"so WPT cannot show it"* in its own
+verdict and then filed two shipped proposals as `not a feature`. The same holds for anything in
+the JS engine below the JS API surface, and for network-protocol defaults (QUIC / HTTP3 version
+negotiation). For these, **absence of tests is expected and is evidence of nothing**; the pref
+and the source are the evidence:
+
+```bash
+searchfox-cli -q '<feature words>' -p StaticPrefList.yaml     # the default, per channel
+searchfox-cli --get-file js/src/wasm/WasmFeatures.h           # the flag predicate
+searchfox-cli -q '<feature>' -p js/moz.configure              # --disable-X means on by default
+```
+
+`js/src/jit-test/tests/wasm/spec/<proposal>/` existing means the spec tests are vendored, i.e.
+implemented. The collector resolves each changelog bug to its controlling pref and puts the
+answer on the box, so normally you can just read it there.
+
+Also invisible: rendering fixes with no reftest, "stopped working after several navigations"-style bugs, event *ordering* changes
 where only the negative case is tested, anything whose spec has no tests yet, and **any
 JavaScript feature newer than WPT's vendored test262 snapshot** — the last of which is
 measurable rather than merely possible, and is what `wpt-js-gaps.js` measures. Absence of

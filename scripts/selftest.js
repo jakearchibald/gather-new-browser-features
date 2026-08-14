@@ -562,6 +562,32 @@ function checklistChecks() {
     return r.bad.length === 0 ? null : `rejected a regression verdict: ${whys(r)}`;
   });
 
+  // A pref flip IS the shipping event. Three of one pass's five misses were enablement bugs
+  // that exited as `not a feature` on the strength of an empty test search — including the two
+  // wasm proposals. Re-running this rule over that pass's finished checklist catches all of them.
+  check('gate: an enablement bug cannot exit as "not a feature: no tests"', () => {
+    const policy = { requirePrefEvidence: new Set(['bug:2062344']) };
+    const bare = verifyChecklist(
+      '[x] bug:2062344  — not a feature: zero matching tests in either run, so WPT cannot show it',
+      null, policy,
+    );
+    if (bare.bad.length !== 1) return `a bare "no tests" verdict was accepted on an enablement box`;
+    if (!/pref default or a source path/.test(bare.bad[0].why)) return 'the reason does not say what is needed';
+    // Citing the pref is accepted...
+    const cited = verifyChecklist(
+      '[x] bug:2062344  — not a feature: not enabled (javascript.options.wasm_x = @IS_NIGHTLY_BUILD@)',
+      null, policy,
+    );
+    if (cited.bad.length) return `a pref-citing verdict was rejected: ${whys(cited)}`;
+    // ...as is a source path, and "written up" is never affected.
+    const src = verifyChecklist('[x] bug:2062344  — not a feature: build-flag only, js/src/wasm/WasmFeatures.h', null, policy);
+    const up = verifyChecklist('[x] bug:2062344  — written up: compact import section', null, policy);
+    if (src.bad.length || up.bad.length) return 'a source path or a written-up verdict was rejected';
+    // And a box NOT in the policy is unaffected.
+    const other = verifyChecklist('[x] bug:9999  — not a feature: no matching tests', null, policy);
+    return other.bad.length ? 'the rule leaked to a non-enablement box' : null;
+  });
+
   check('gate: a churn directory needs no verdict', () => {
     const r = verifyChecklist('[x] /some/dir  (3f, churn)');
     return r.bad.length === 0 ? null : `churn line flagged: ${whys(r)}`;
@@ -1272,7 +1298,14 @@ Temporal
     });
     if (v !== 'platform-split') return `expected platform-split, got ${v}`;
     // It ships somewhere, so it must NOT be swept up by the discount rule.
-    return PR.discount('platform-split') ? 'a platform split was discounted wholesale' : null;
+    if (PR.discount('platform-split')) return 'a platform split was discounted wholesale';
+    // ...and the same must hold once the milestone logic runs.
+    const bugV = PR.verdictForBug(
+      { 'mozilla-central': split, 'mozilla-beta': gatedOnly, 'mozilla-release': gatedOnly },
+      { milestone: '155 Branch' }, { 'mozilla-beta': 154 },
+    );
+    return bugV.verdict === 'platform-split'
+      ? null : `the milestone path collapsed it to ${bugV.verdict}`;
   });
 
   check('prefs: an outdated resolver is called out, not silently trusted', () => {
@@ -1422,7 +1455,7 @@ Temporal
     const { short, lines } = bugFinding({ ...r, id: 1 });
     const text = lines.join(' ');
     if (/only source/.test(short)) return `the short form asserts it: ${short}`;
-    for (const want of [/NOT enabled/, /no WPT coverage/, /vocabulary/]) {
+    for (const want of [/NOT enabled/, /no WPT coverage/i, /vocabulary/]) {
       if (!want.test(text)) return `the three possibilities are not all offered: missing ${want}`;
     }
     return null;
@@ -1441,6 +1474,114 @@ Temporal
     // A precise one should.
     const precise = cl.matchAgainstDiff({ summary: 'Implement RTCIceTransport.foo()' }, [], stillFailing);
     return precise.failingHits.length ? null : 'a precise token did not match a failing path';
+  });
+
+  // WebAssembly is the category with NO WPT coverage by construction — a binary-format change
+  // has no JS API surface, so no test can ever observe it. One pass wrote "so WPT cannot show
+  // it" in its own verdict and then filed two shipped proposals as `not a feature`.
+  check('changelog: a disproved weak match inherits the no-coverage guidance', () => {
+    // The precise gap: `weak match only` says "confirm by eye", the reader correctly disproves
+    // it, and then there is nowhere to go — the three-reason list lives only on "not in the
+    // diff". So the weak-match text has to carry it too.
+    const bug = {
+      id: 1, summary: 'Ship the compact import section proposal', component: 'JavaScript: WebAssembly',
+      tokens: [], weakTokens: ['import'], hits: [], unsearchable: false,
+      weakHits: [{ test: '/html/x/repeated-imports.any.html', deltaPass: 1, matched: ['import'] }],
+    };
+    const text = bugFinding(bug).lines.join(' ');
+    if (!/ONCE DISPROVED/.test(text)) return 'a disproved weak match does not point anywhere';
+    if (!/WebAssembly/i.test(text)) return 'the no-coverage categories do not name WebAssembly';
+    return /not a feature/.test(text) ? null : 'it does not warn against the wrong verdict';
+  });
+
+  check('changelog: a pref name decomposes to the API it gates', () => {
+    // `Let svg.new-getBBox.enabled ... ride the trains` produced five strong tokens and every
+    // one was a PREF NAME. Pref names live in StaticPrefList.yaml and never in test names, so
+    // the search could only return nothing — and `getBBox`, the API the pref gates, sat inside
+    // `svg.new-getBBox.enabled` unsearched, because only the hyphenated segment and its head
+    // (`new`, too short) were considered. The evidence was in the diff all along:
+    // /svg/types/scripted/SVGGraphicsElement.getBBox-05.html.
+    const t = cl.tokensFor('Let svg.new-getBBox.enabled and svg.Moz2D.strokeBounds.enabled ride the trains');
+    if (!t.strong.includes('getBBox')) return `getBBox not extracted: ${t.strong.join(', ')}`;
+    if (!t.strong.includes('strokeBounds')) return 'strokeBounds was lost';
+    // And it must actually match the test that carries it.
+    const g = cl.matchAgainstDiff(
+      { summary: 'Let svg.new-getBBox.enabled ride the trains' },
+      [{ test: '/svg/types/scripted/SVGGraphicsElement.getBBox-05.html', deltaPass: 8, subtests: { newlyPassing: [{ name: 'path with stroke' }] } }],
+      [],
+    );
+    return g.hits.length ? null : 'the decomposed token still did not match the evidence';
+  });
+
+  check('changelog: an all-pref-names summary explains its own empty result', () => {
+    const bug = {
+      id: 1, summary: 'x', component: 'SVG',
+      tokens: ['svg.foo.enabled', 'layout.css.bar.enabled'], weakTokens: [],
+      hits: [], weakHits: [], unsearchable: false,
+    };
+    const text = bugFinding(bug).lines.join(' ');
+    return /PREF NAME/.test(text) && /fact about the query/.test(text)
+      ? null : 'an all-pref-name summary did not explain why nothing matched';
+  });
+
+  check('changelog: an enablement TITLE is enough, with no dev-doc keyword', () => {
+    // The dev-doc keyword needs someone to remember it. A flip's title is written by the person
+    // landing the flip, so it needs nothing — and it is the only route to the two untagged
+    // misses on one real release: `Enable QUIC v2 version negotiation on all channels` and
+    // `Enable Happy Eyeballs v3 by default`, neither of which can ever have a WPT test.
+    const cases = [
+      ['Enable QUIC v2 version negotiation on all channels', true],
+      ['Enable Happy Eyeballs v3 by default', true],
+      ['Let svg.new-getBBox.enabled and svg.Moz2D.strokeBounds.enabled ride the trains', true],
+      ['Set layout.css.progress-function.enabled for all users', true],
+      ['Ship the Wide Arithmetic proposal', true],
+      ['Enable new CSS attr() on Release', true],
+      // ...and titles that are not enablement events must not match.
+      ['Intermittent Assertion failure: data, at WasmValue.cpp', false],
+      ['[wpt-sync] Sync PR 61535 - Update Wasm tests', false],
+      ['Port Bug 2052809 Part 2 to loong64 and mips64', false],
+    ];
+    for (const [summary, want] of cases) {
+      if (cl.ENABLEMENT.test(summary) !== want) {
+        return `${want ? 'missed' : 'wrongly matched'}: ${summary.slice(0, 60)}`;
+      }
+    }
+    return null;
+  });
+
+  check('changelog: a Ship bug with no tests is not resolvable as "no tests"', () => {
+    const fresh = {
+      ok: true, version: 155, milestone: '155 Branch', total: 10, census: [],
+      curated: [{
+        id: 2062344, summary: 'Ship the compact import section proposal', product: 'Core',
+        component: 'JavaScript: WebAssembly', isShip: true,
+        tokens: [], weakTokens: [], hits: [], weakHits: [], unsearchable: false,
+      }],
+    };
+    const text = bugChecklistLines(fresh).join('\n');
+    if (!/SHIP BUG, no test evidence/.test(text)) return 'a Ship bug with no evidence is not flagged';
+    return /does NOT disqualify/.test(text) && /do NOT write "not a feature: no tests"/.test(text)
+      ? null : 'the box does not forbid the verdict that lost two proposals';
+  });
+
+  check('changelog: a bug carries its controlling pref, with the train caveat', () => {
+    const bug = {
+      id: 2062374, summary: 'Ship the Wide Arithmetic proposal', component: 'JavaScript: WebAssembly',
+      tokens: [], weakTokens: [], hits: [], weakHits: [], unsearchable: false,
+      prefMatch: {
+        pref: 'javascript.options.wasm_wide_arithmetic', tokensMatched: 2, verdict: 'shipped',
+        per: {
+          'mozilla-central': { raw: 'true', gated: false, shipped: true, nightly: true },
+          'mozilla-beta': { raw: '@IS_NIGHTLY_BUILD@', gated: true, shipped: false, nightly: true },
+          'mozilla-release': { raw: '@IS_NIGHTLY_BUILD@', gated: true, shipped: false, nightly: true },
+        },
+        trainNote: 'mozilla-beta is still 154, so its gate describes 154, not 155',
+      },
+    };
+    const text = bugFinding(bug).lines.join(' ');
+    if (!/wasm_wide_arithmetic/.test(text)) return 'the pref is not named';
+    if (!/tests or no tests/.test(text)) return 'it does not say tests are unnecessary here';
+    return /still 154/.test(text) ? null : 'the train caveat is missing';
   });
 
   check('changelog: every bug becomes a box, and box paths need no quoting', () => {

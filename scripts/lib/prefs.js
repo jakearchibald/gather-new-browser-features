@@ -238,8 +238,8 @@ function ancestorsOf(testPath) {
  * anything fails the result says so, because "no nightly-only features found" and "the check
  * did not run" must never look the same.
  */
-async function analysePrefGating(tests, { concurrency = 8, onProgress } = {}) {
-  const tool = await searchfoxVersion();
+async function analysePrefGating(tests, { concurrency = 8, onProgress, prefLists = null } = {}) {
+  const tool = prefLists ? prefLists.tool : await searchfoxVersion();
   if (!tool.present) {
     return {
       ok: false,
@@ -249,11 +249,14 @@ async function analysePrefGating(tests, { concurrency = 8, onProgress } = {}) {
     };
   }
   try {
-    const lists = {};
-    for (const repo of REPOS) {
-      const text = await run(['-R', repo, '--get-file', SPL]);
-      if (!text) throw new Error(`could not read ${SPL} from ${repo}`);
-      lists[repo] = parseStaticPrefList(text);
+    let lists = prefLists && prefLists.lists;
+    if (!lists) {
+      lists = {};
+      for (const repo of REPOS) {
+        const text = await run(['-R', repo, '--get-file', SPL]);
+        if (!text) throw new Error(`could not read ${SPL} from ${repo}`);
+        lists[repo] = parseStaticPrefList(text);
+      }
     }
 
     const dirs = [...new Set(tests.flatMap((t) => ancestorsOf(t)))].sort();
@@ -490,8 +493,190 @@ function nightlyOnlyTests(gating) {
   return gating.gatedTests;
 }
 
+
+/**
+ * Resolve changelog bugs to the pref that controls them, and to that pref's channel verdict.
+ *
+ * This is the half that was missing, and WebAssembly is what exposed it. A wasm proposal is a
+ * binary-format and instruction-set change with no JavaScript API surface, so it has **no WPT
+ * coverage in either direction** — by design, permanently, not as a lag. Every test-based
+ * signal in this toolkit therefore says nothing about it, and one real 155 pass read that
+ * silence as "cannot verify" and dropped both shipped proposals (bug 2062344 compact import
+ * section, bug 2062374 wide arithmetic) until a human put them back.
+ *
+ * But the authoritative evidence exists and is one lookup away: `Ship the compact import
+ * section proposal` maps to `javascript.options.wasm_compact_imports`, whose default across
+ * mozilla-central/-beta/-release says exactly whether a user has it. So the box can carry the
+ * answer instead of the reader having to know that wasm needs a different method.
+ *
+ * Matching is bug-summary <-> pref-name on distinctive tokens, with prefix comparison because
+ * the two are not identically inflected: the pref says `compact_imports` and the bug says
+ * "compact import section".
+ */
+// A bug's component narrows which prefs could possibly control it, and it is the difference
+// between finding the right pref and finding a coincidence: "Ship the compact import section
+// proposal" matched `javascript.options.compact_on_user_inactive` on the word "compact" until
+// the component said the pref had to be about wasm.
+const COMPONENT_HINTS = [
+  [/WebAssembly/i, /wasm/i],
+  [/JavaScript/i, /^javascript\./i],
+  [/CSS|Layout/i, /^layout\./i],
+  [/DOM|HTML/i, /^dom\./i],
+  [/Networking/i, /^network\./i],
+  [/WebRTC|Audio|Video|Media/i, /^media\./i],
+  [/Graphics|Canvas/i, /^(gfx|image|webgl)\./i],
+  [/MathML/i, /^mathml\./i],
+  [/SVG/i, /^svg\.|^layout\./i],
+  [/Security|Privacy/i, /^(security|privacy|dom\.security)\./i],
+];
+
+/** Individual words of a pref name — `wasm_wide_arithmetic` -> wasm, wide, arithmetic. */
+function prefWords(name) {
+  return [...new Set(
+    String(name).split(/[._-]+/).filter((w) => w.length >= 4 && !GENERIC.has(w.toLowerCase())),
+  )];
+}
+
+function prefsForBugs(lists, bugs, milestones = null) {
+  // Index prefs by their individual words once. The whole hyphenated name as a single token
+  // was too coarse: `wasm_wide_arithmetic` produced one token that no summary word could
+  // prefix-match, so the Wide Arithmetic proposal resolved to nothing at all.
+  const index = new Map();
+  const central = lists['mozilla-central'] || new Map();
+  for (const name of central.keys()) {
+    for (const t of prefWords(name)) {
+      const k = t.toLowerCase();
+      if (!index.has(k)) index.set(k, []);
+      index.get(k).push(name);
+    }
+  }
+  const out = {};
+  for (const bug of bugs) {
+    const summaryWords = words(bug.summary).trim().split(/\s+/).filter((w) => w.length >= 4);
+    const scores = new Map();
+    for (const [token, names] of index) {
+      // Prefix comparison in both directions: `imports` vs `import`, `arithmetic` vs
+      // `arithmetics`. Five characters is enough to stay specific without demanding the same
+      // inflection.
+      const hit = summaryWords.some((w) => {
+        if (w === token) return true;   // exact, whatever the length: `wide` is four characters
+        const n = Math.min(w.length, token.length);
+        return n >= 5 && (w.startsWith(token.slice(0, n)) || token.startsWith(w.slice(0, n)));
+      });
+      if (!hit) continue;
+      for (const name of names) scores.set(name, (scores.get(name) || 0) + 1);
+    }
+    if (!scores.size) continue;
+    // The component hint is a filter, not a tiebreak: a pref outside the namespace its
+    // component implies is a coincidence however many words it shares.
+    const hint = (COMPONENT_HINTS.find(([c]) => c.test(bug.component || '')) || [])[1];
+    let ranked = [...scores.entries()];
+    if (hint) {
+      const inNamespace = ranked.filter(([name]) => hint.test(name));
+      if (inNamespace.length) ranked = inNamespace;
+    }
+    // Most words matched wins; ties break toward the shorter name, which is the less
+    // specific and so more likely to be the feature's own switch.
+    const best = ranked.sort((a, b) => b[1] - a[1] || a[0].length - b[0].length)[0];
+    // Two matching words minimum. One is a coincidence — `compact` alone found a pref about
+    // inactive-user compaction.
+    if (best[1] < 2) continue;
+    const per = {};
+    for (const repo of REPOS) per[repo] = (lists[repo] || new Map()).get(best[0]) || null;
+    out[bug.id] = {
+      pref: best[0],
+      tokensMatched: best[1],
+      per,
+      ...verdictForBug(per, bug, milestones),
+    };
+  }
+  return out;
+}
+
+/**
+ * Which Firefox version each repo currently is.
+ *
+ * Needed because the trains do not line up with the version being written about: on one real
+ * day mozilla-central was 156 while -beta and -release were both 154, so notes about 155 mapped
+ * to no repo. Without this, a pref flipped during 155's cycle reads as nightly-only, because
+ * the beta branch still carries 154's gate.
+ */
+async function fetchMilestones() {
+  const out = {};
+  for (const repo of REPOS) {
+    const text = await run(['-R', repo, '--get-file', 'config/milestone.txt']);
+    const m = clean(text || '').split('\n').map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#')).pop();
+    const v = m && m.match(/^(\d+)/);
+    out[repo] = v ? Number(v[1]) : null;
+  }
+  return out;
+}
+
+/**
+ * A bug's pref verdict, accounting for where the release trains actually are.
+ *
+ * The shipped-channel repos can only speak for the versions they hold. `Ship the Wide
+ * Arithmetic proposal` is fixed for 155, the pref is unconditionally true in central, and
+ * mozilla-beta — still on 154 — carries `@IS_NIGHTLY_BUILD@`. Reading beta gives
+ * "nightly-only", which is 154's answer to a question about 155. When the bug's milestone is
+ * ahead of the beta branch, the flip landed inside that cycle and central is the evidence.
+ */
+function verdictForBug(per, bug, milestones) {
+  const plain = verdictFor(per);
+  const target = String(bug.milestone || '').match(/^(\d+)/);
+  const beta = milestones && milestones['mozilla-beta'];
+  if (!target || !beta) return { verdict: plain, trainNote: null };
+  const n = Number(target[1]);
+  if (n <= beta) return { verdict: plain, trainNote: null };
+  const central = per['mozilla-central'];
+  // Platform-split first: `network.http.happy_eyeballs_enabled` is `@IS_NIGHTLY_BUILD@` on
+  // Android and `true` elsewhere, so central is BOTH gated and shipping. Reading only `gated`
+  // returned nightly-only and would have told the reader desktop users do not have it.
+  if (central && central.gated && central.shipped === true) {
+    return {
+      verdict: 'platform-split',
+      trainNote: `central ships it on some platforms and gates it on others (${central.raw}) — `
+        + 'say which, rather than treating it as available or as nightly-only',
+    };
+  }
+  if (central && central.gated) {
+    return {
+      verdict: 'nightly-only',
+      trainNote: `gated in mozilla-central too, so ${n} does not get it`,
+    };
+  }
+  if (central && central.shipped === true) {
+    return {
+      verdict: 'shipped',
+      trainNote: `mozilla-beta is still ${beta}, so its gate describes ${beta}, not ${n}; `
+        + `central has it unconditionally, i.e. the flip landed in ${n}'s cycle`,
+    };
+  }
+  return { verdict: 'unclear', trainNote: `no repo holds ${n}; check the pref by hand` };
+}
+
+/** Fetch the three pref lists on their own, for callers that only want prefsForBugs. */
+async function fetchPrefLists() {
+  const tool = await searchfoxVersion();
+  if (!tool.present) return { ok: false, missingTool: true, tool };
+  try {
+    const lists = {};
+    for (const repo of REPOS) {
+      const text = await run(['-R', repo, '--get-file', SPL]);
+      if (!text) throw new Error(`could not read ${SPL} from ${repo}`);
+      lists[repo] = parseStaticPrefList(text);
+    }
+    const milestones = await fetchMilestones();
+    return { ok: true, tool, lists, milestones };
+  } catch (err) {
+    return { ok: false, tool, error: String((err && err.message) || err) };
+  }
+}
+
 module.exports = {
   haveSearchfox, searchfoxVersion, parseStaticPrefList, parseDirIni, analysePrefGating, verdictFor,
   prefsForTest, nightlyOnlyTests, ancestorsOf, discount, dirMarker, matchPrefsToTests,
-  prefTokens, words, VERDICT_LABEL, REPOS, CHANNEL_MACROS, GENERIC,
+  prefTokens, prefWords, words, prefsForBugs, fetchPrefLists, fetchMilestones, verdictForBug, VERDICT_LABEL, REPOS, CHANNEL_MACROS,
+  GENERIC,
 };

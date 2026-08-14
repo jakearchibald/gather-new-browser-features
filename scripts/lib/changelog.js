@@ -52,6 +52,33 @@ const SHOW = 'https://bugzilla.mozilla.org/show_bug.cgi?id=';
 // only one silently halves the list.
 const DEV_DOC = 'dev-doc-needed,dev-doc-complete';
 
+/**
+ * Bug titles that describe an enablement event.
+ *
+ * The dev-doc keyword needs someone to remember it; this needs nothing, because **the title of
+ * a flip IS the description of the flip** and is written by the person landing it. That makes it
+ * a better filter than the keyword for exactly the features with no test coverage.
+ *
+ * Found by looking for the one bug that got away: `Enable QUIC v2 version negotiation on all
+ * channels` was untagged, has no possible WPT coverage, and was reachable only by guessing the
+ * word "QUIC". The same sweep found a second untagged miss in the same release — `Enable Happy
+ * Eyeballs v3 by default` — plus `Let svg.new-getBBox.enabled … ride the trains`.
+ *
+ * `by default` earns its place separately: it is the phrasing used when the pref name is not in
+ * the title, which is precisely when nothing else would match.
+ */
+const ENABLEMENT = /^(ship|enable|set|let)\b|ride the trains|for all users|on all channels|on release\b|by default/i;
+
+// The web-platform product. Enablement titles outside it are overwhelmingly build, CI, Android
+// app and Thunderbird work — surfaced as leads rather than boxed, so the boundary is visible
+// without 20 more boxes a release.
+const WEB_PLATFORM = /^Core\//;
+
+// A title that names a pref, a spec/proposal, or a version is near-certainly a real feature
+// event; one whose verb takes an internal knob usually is not.
+const NAMES_SOMETHING_REAL = /\b[a-z][\w-]*(?:\.[\w-]+){2,}\b|\bproposal\b|\bRFC ?\d|\bv\d\b|\bAPI\b/i;
+const namesSomethingReal = (b) => NAMES_SOMETHING_REAL.test(b.summary);
+
 const FIELDS = 'id,summary,product,component,keywords,target_milestone,resolution';
 
 /**
@@ -127,8 +154,27 @@ function tokensFor(summary) {
   };
   for (const t of raw) {
     consider(t);
+    // Decompose fully: dotted parts, the de-hyphenated whole, AND each hyphen part.
+    //
+    // The last one is the fix for a real miss. `Let svg.new-getBBox.enabled ... ride the
+    // trains` produced five strong tokens and every one was a PREF NAME — and pref names
+    // appear in StaticPrefList.yaml and never in WPT test names, so the search was guaranteed
+    // to return nothing. `getBBox`, the API the pref gates, was sitting inside
+    // `svg.new-getBBox.enabled` and was never searched, because only the hyphenated segment
+    // and its HEAD (`new`, too short) were considered. With the tail included, the evidence is
+    // right there: /svg/types/scripted/SVGGraphicsElement.getBBox-05.html, whose subtests are
+    // named for exactly the options argument that shipped.
     if (t.includes('.')) for (const part of t.split('.')) consider(part);
-    if (t.includes('-')) consider(t.replace(/-/g, ''));
+    if (t.includes('-')) {
+      consider(t.replace(/-/g, ''));
+      for (const part of t.split('-')) consider(part);
+    }
+    // A dotted segment can itself be hyphenated, so reach the parts of those too.
+    if (t.includes('.') && t.includes('-')) {
+      for (const part of t.split('.')) {
+        for (const sub of part.split('-')) consider(sub);
+      }
+    }
   }
   // A pref name is longer than the feature's test directory: the pref is
   // `layout.css.tree-counting-functions.enabled` and the tests are in
@@ -268,7 +314,7 @@ async function fetchChangelog(netFetch, product, version, changedTests, stillFai
   }
   try {
     const milestone = `${version} Branch`;
-    const [all, curatedByMilestone, curatedByStatus] = await Promise.all([
+    const [all, curatedByMilestone, curatedByStatus, shipBugs] = await Promise.all([
       query(netFetch, { target_milestone: milestone, resolution: 'FIXED' }),
       query(netFetch, {
         target_milestone: milestone, resolution: 'FIXED',
@@ -278,10 +324,32 @@ async function fetchChangelog(netFetch, product, version, changedTests, stillFai
         f1: `cf_status_firefox${version}`, o1: 'equals', v1: 'fixed',
         keywords: DEV_DOC, keywords_type: 'anywords',
       }),
+      // Every "Ship <proposal>" bug for the release, keyword or not. That summary is Mozilla's
+      // own word for "this is now on by default", so it is developer-facing by definition and
+      // must not depend on someone having remembered a dev-doc keyword. On one release all three
+      // happened to carry one; that was luck, not a guarantee.
+      query(netFetch, {
+        target_milestone: milestone, resolution: 'FIXED',
+        f1: 'short_desc', o1: 'substring', v1: 'Ship',
+      }),
     ]);
 
     const byId = new Map();
     for (const b of [...curatedByMilestone, ...curatedByStatus]) byId.set(b.id, b);
+    for (const b of shipBugs) {
+      // "Ship" as a substring also matches Shippable/shipping-product and a pile of
+      // intermittent-test bugs, so keep only summaries that actually start with it.
+      if (/^ship\b/i.test(b.summary)) byId.set(b.id, b);
+    }
+    // Every enablement title in the WEB PLATFORM product, keyword or not. 39 of 2570 titles
+    // match on one real release, 18 of them in Core, and that set contained two features
+    // nothing else here could reach. Outside Core they are listed as leads instead.
+    const enablementLeads = [];
+    for (const b of all) {
+      if (!ENABLEMENT.test(b.summary)) continue;
+      if (WEB_PLATFORM.test(`${b.product}/${b.component}`)) byId.set(b.id, b);
+      else enablementLeads.push(b);
+    }
     const curated = [...byId.values()]
       .map((b) => ({
         id: b.id,
@@ -289,11 +357,21 @@ async function fetchChangelog(netFetch, product, version, changedTests, stillFai
         product: b.product,
         component: b.component,
         milestone: b.target_milestone,
+        // A "Ship …"/"Enable …" title is an enablement event by the vendor's own description, so
+        // an empty test match is expected rather than disqualifying.
+        isShip: ENABLEMENT.test(b.summary),
+        devDoc: (b.keywords || []).some((k) => /^dev-doc/.test(k)),
         url: `${SHOW}${b.id}`,
         notForUsers: enablementFromSummary(b.summary),
         ...matchAgainstDiff(b, changedTests, stillFailing),
       }))
-      .sort((a, b) => (a.hits.length - b.hits.length)   // unmatched first: those are the gaps
+      // Unmatched first (those are the gaps), then near-certainly-real enablement titles ahead
+      // of the rest. The noise in an enablement sweep has one shape: the object of the verb is
+      // an internal knob (`Set the number of render backend threads to 2`) rather than a named
+      // feature or a pref. A title carrying a pref name, or a spec/proposal/version token, is
+      // near-certainly real. Nothing is dropped — the glance-cost just moves to the bottom.
+      .sort((a, b) => (a.hits.length - b.hits.length)
+        || (namesSomethingReal(b) ? 1 : 0) - (namesSomethingReal(a) ? 1 : 0)
         || a.component.localeCompare(b.component)
         || a.id - b.id);
 
@@ -311,6 +389,10 @@ async function fetchChangelog(netFetch, product, version, changedTests, stillFai
       milestone,
       total: all.length,
       curated,
+      // Enablement titles outside the web-platform product: visible, not boxed.
+      enablementLeads: enablementLeads.map((b) => ({
+        id: b.id, summary: b.summary, key: `${b.product}/${b.component}`,
+      })),
       census: [...census.entries()]
         .map(([key, bugs]) => ({ key, count: bugs.length, bugs }))
         .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key)),
@@ -321,6 +403,6 @@ async function fetchChangelog(netFetch, product, version, changedTests, stillFai
 }
 
 module.exports = {
-  fetchChangelog, tokensFor, matchAgainstDiff, matchPaths, enablementFromSummary,
+  fetchChangelog, tokensFor, matchAgainstDiff, matchPaths, enablementFromSummary, ENABLEMENT,
   DEV_DOC, SHOW,
 };

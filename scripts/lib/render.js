@@ -589,6 +589,68 @@ function bugBoxPath(id) {
  *   unsearchable no candidate token in the summary, so it was never checked. Explicitly NOT
  *                the same as no-evidence.
  */
+/**
+ * The controlling pref for a bug, where one could be resolved.
+ *
+ * For a category WPT cannot cover at all — a WebAssembly binary-format change, a QUIC version
+ * negotiation default — this is the only positive evidence there is, so it goes on the box.
+ * Labelled a candidate because bug-summary-to-pref-name matching is a strong hint and not proof.
+ */
+function bugPrefLines(bug) {
+  const m = bug.prefMatch;
+  if (!m) return [];
+  const per = m.per || {};
+  const raw = (r) => (per[r] ? per[r].raw : 'absent');
+  const out = [
+    `controlling pref (candidate, ${m.tokensMatched} word(s) matched): ${m.pref}`,
+    `  central=${raw('mozilla-central')}  beta=${raw('mozilla-beta')}  release=${raw('mozilla-release')}`,
+  ];
+  if (m.verdict === 'shipped') out.push('  => ON for users. This IS news, tests or no tests.');
+  else if (m.verdict === 'platform-split') {
+    out.push('  => ON for users on SOME platforms only. Write it up, and name the platforms —');
+    out.push('     neither "available" nor "nightly-only" is true of it.');
+    // Partiality stacks on more than one axis, and the platform split is the visible one.
+    // Happy Eyeballs v3 is on for HTTP connections on desktop, and its sibling
+    // `..._upgrade_enabled` is unconditionally nightly — so it is off for WebSockets everywhere.
+    // Finding the platform split is exactly when it is easiest to stop looking.
+    out.push('     Then check for SIBLING prefs gating part of it: a `..._upgrade_enabled` or');
+    out.push('     `..._<subfeature>_enabled` next to this one can be off while this is on.');
+  } else if (m.verdict === 'nightly-only') out.push('  => NIGHTLY-ONLY. Do not present it as available.');
+  else out.push(`  => ${VERDICT_LABEL[m.verdict] || m.verdict}. Confirm the pref by hand.`);
+  if (m.trainNote) out.push(`  note: ${m.trainNote}`);
+  return out;
+}
+
+// Categories WPT does not cover and never will, so an empty match is EXPECTED rather than
+// informative. Naming them is the fix for a real miss: one pass wrote "so WPT cannot show it"
+// in its own verdict and then filed the bug as `not a feature` anyway.
+const NO_COVERAGE_CATEGORIES = [
+  'WebAssembly binary-format and instruction-set changes (no JS API surface, so no WPT test',
+  '  can ever observe them — the payoff is smaller modules or faster arithmetic)',
+  'anything in the JS engine below the JS API surface, and network-protocol defaults (QUIC,',
+  '  HTTP/3 version negotiation)',
+  'DevTools, WebExtensions, and internal media/codec changes',
+];
+
+/** Were all the strong identifiers pref names? Then an empty match explains itself. */
+function allPrefShaped(bug) {
+  const toks = bug.tokens || [];
+  if (!toks.length) return false;
+  return toks.every((t) => /^(layout|dom|svg|network|javascript|image|media|gfx|mathml|browser|privacy|security|accessibility)\./i.test(t)
+    || /\.(enabled|disabled)$/i.test(t));
+}
+
+function prefEvidence(bug) {
+  const lines = bugPrefLines(bug);
+  if (lines.length) return lines;
+  return [
+    'No controlling pref was resolved automatically. Get it by hand — this is the evidence',
+    'that replaces a test:  searchfox-cli -q \'<feature words>\' -p StaticPrefList.yaml',
+    '  and for wasm also js/src/wasm/WasmFeatures.h, js/moz.configure (an opt-out spelled',
+    '  --disable-<feature> means on by default) and js/src/jit-test/tests/wasm/spec/<proposal>/',
+  ];
+}
+
 function bugFinding(bug) {
   // Tests that exist and still fail in the "to" run, matched on a PRECISE identifier only.
   // Context, never a classification: see lib/changelog.js for why the loose version had to go.
@@ -633,6 +695,14 @@ function bugFinding(bug) {
           + `(${bug.weakHits[0].matched.join(', ')}), starting with`,
         `  ${bug.weakHits[0].test}`,
         'Treat as a lead and confirm by eye: a generic-word match is usually a coincidence.',
+        // The gap a real pass fell into: it correctly disproved a 100-file `import` match and
+        // then had nowhere to go, so it filed a shipped proposal as `not a feature`. Once
+        // disproved, this case IS "not in the diff" and needs the same guidance.
+        'ONCE DISPROVED, THIS BOX IS "not in the diff" — do not stop here. An empty match is',
+        'EXPECTED, not negative, for:',
+        ...NO_COVERAGE_CATEGORIES.map((l) => `  - ${l}`),
+        'so go and get non-WPT evidence rather than writing "not a feature".',
+        ...prefEvidence(bug),
         ...pref],
     };
   }
@@ -645,13 +715,23 @@ function bugFinding(bug) {
     short: bug.notForUsers ? `not in the diff, and ${bug.notForUsers}` : 'not in the diff',
     lines: [
       `Searched the diff for ${bug.tokens.concat(bug.weakTokens).slice(0, 6).join(', ')} and found nothing.`,
+      // Why it found nothing, when that is knowable. A pref name lives in StaticPrefList.yaml
+      // and never in a test name, so a summary made only of pref names cannot match anything —
+      // which is a fact about the query, not about the feature.
+      ...(allPrefShaped(bug) ? [
+        'Every identifier above is a PREF NAME, and pref names never appear in test names — so',
+        'this empty result is a fact about the query, not about the feature. The API the pref',
+        'gates is the thing to search for; wpt-prefs.js resolves the pref\'s default.',
+      ] : []),
       'Three possibilities, and they need opposite write-ups:',
       '  - landed but NOT enabled (behind a pref, or nightly-only). Its tests may exist and',
       '    fail in both runs, which is CORRECT. Check with wpt-state.js before writing it up.',
-      '  - no WPT coverage at all — DevTools, WebExtensions and internal media changes are',
-      '    never in WPT, so the bug really is the only source.',
+      '  - NO WPT COVERAGE AT ALL, which is EXPECTED for these and is not a negative result:',
+      ...NO_COVERAGE_CATEGORIES.map((l) => `      - ${l}`),
+      '    For these the bug really is the only source, and "no tests" is not a reason to drop',
+      '    them. "not a feature" is the wrong verdict: they ARE features, just unobservable here.',
       '  - covered, but under vocabulary these tokens missed. Try wpt-grep.js.',
-      ...stillFails, ...pref],
+      ...prefEvidence(bug), ...stillFails, ...pref],
   };
 }
 
@@ -751,7 +831,15 @@ function bugChecklistLines(cl) {
   p('');
   for (const box of boxes) {
     const f = bugFinding(box.bug);
-    p(`[ ] ${box.path}   (${f.short})`);
+    const ship = box.bug.isShip && !box.bug.hits.length;
+    p(`[ ] ${box.path}   (${f.short}${ship ? '; SHIP BUG, no test evidence' : ''})`);
+    if (ship) {
+      // The rule a real pass needed: it disproved a weak match, had no positive-evidence path,
+      // and filed a shipped proposal as "not a feature".
+      p('      This is a "Ship ..." bug, i.e. a feature turned ON for this release by Mozilla\'s');
+      p('      own description of it. Absence of tests does NOT disqualify it — resolve this from');
+      p('      the pref/source evidence below, and do NOT write "not a feature: no tests".');
+    }
     p(`      ${clip(box.bug.summary, 92)}`);
     p(`      ${box.bug.product}/${box.bug.component}`);
     for (const line of f.lines) p(`      ${line}`);
@@ -1584,7 +1672,15 @@ function verdictOf(line) {
  * an artifact collected before it was written — the inventory check is skipped and
  * says so, rather than silently reporting a clean bill of health it did not check.
  */
-function verifyChecklist(text, expected = null) {
+/**
+ * A verdict that cites a pref default or a source path, rather than inferring from silence.
+ *
+ * `layout.css.foo.enabled = false`, `js/src/wasm/WasmFeatures.h`, `StaticPrefList.yaml` — the
+ * shapes that mean "I looked it up". A bare `not a feature: no tests` cites nothing.
+ */
+const CITES_EVIDENCE = /\b[a-z][\w-]*(?:\.[\w-]+){2,}\b|\b\w+\.(?:h|yaml|cpp|configure|js)\b|StaticPrefList|WasmFeatures|moz\.configure/i;
+
+function verifyChecklist(text, expected = null, policy = {}) {
   const open = [];
   const bad = [];
   let done = 0;
@@ -1656,6 +1752,24 @@ function verifyChecklist(text, expected = null) {
       bad.push({
         line: b.line,
         why: '"explained" but nothing it names appears in another box or in any "written up" verdict',
+      });
+      continue;
+    }
+    // An enablement bug's answer must come from the pref list, never from the diff's silence.
+    //
+    // This is the single rule that closes the largest share of one pass's misses: three of its
+    // five — both WebAssembly proposals and the getBBox pref flip — were enablement bugs that
+    // exited as `not a feature` on the strength of an empty search. A pref flip IS the shipping
+    // event, so "no tests" can never be the reason to drop one; the pref's default can.
+    const needsPref = policy.requirePrefEvidence
+      && policy.requirePrefEvidence.has(b.path)
+      && /\bnot[ -]a[ -]feature\b/i.test(b.verdict);
+    if (needsPref && !CITES_EVIDENCE.test(b.verdict)) {
+      bad.push({
+        line: b.line,
+        why: 'this is an ENABLEMENT bug (a pref flip IS the shipping event), so "not a feature" '
+          + 'must cite the pref default or a source path — e.g. "not a feature: not enabled '
+          + '(layout.css.foo.enabled = @IS_NIGHTLY_BUILD@)". An empty test search is not a reason.',
       });
     }
   }
@@ -2045,5 +2159,5 @@ module.exports = {
   messageNamesSomething, CATEGORIES, jsBoxPath, jsGapBoxes, jsHorizonLines,
   jsChecklistLines, jsFinding, jsFyiLines, jsUpstreamLines, jsHorizonCaveat,
   changelogLines, bugChecklistLines, bugGapBoxes, bugFinding, bugBoxPath,
-  prefGatingLines, prefCaveat,
+  prefGatingLines, prefCaveat, bugPrefLines, NO_COVERAGE_CATEGORIES,
 };

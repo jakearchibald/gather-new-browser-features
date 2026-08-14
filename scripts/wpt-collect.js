@@ -87,7 +87,9 @@ const { fetchCoverageHorizon } = require('./lib/test262.js');
 const { whatShipped, sourceFor, majorVersion } = require('./lib/shipped.js');
 const { fetchResults } = require('./lib/test262fyi.js');
 const { fetchChangelog } = require('./lib/changelog.js');
-const { analysePrefGating, matchPrefsToTests, haveSearchfox } = require('./lib/prefs.js');
+const {
+  analysePrefGating, matchPrefsToTests, fetchPrefLists, prefsForBugs,
+} = require('./lib/prefs.js');
 const artifact = require('./lib/artifact.js');
 const { usage, num, unknownOption } = require('./lib/cli.js');
 const { classify, statusDirection, areaOf, revisionResolver } = require('./lib/wpt.js');
@@ -621,6 +623,17 @@ async function main() {
   // it catches both a reading miss (RTCIceTransport.getSelectedCandidatePair(), in the diff
   // and absent from the notes) and a coverage gap (:open for <select>, FAIL 0/0 in both runs
   // so no view here can show it). Firefox only; ~4 queries, ~570KB.
+  // Fetched once and shared: the changelog needs them to resolve a bug to its controlling pref,
+  // and the gating check needs them for the WPT-forced prefs.
+  process.stderr.write('Reading pref defaults across the release trains (searchfox)...\n');
+  const prefLists = await fetchPrefLists();
+  if (!prefLists.ok) {
+    process.stderr.write(`  note: ${prefLists.missingTool ? 'searchfox-cli is not installed' : prefLists.error}\n`);
+  } else {
+    process.stderr.write(`  trains: central=${prefLists.milestones['mozilla-central']} `
+      + `beta=${prefLists.milestones['mozilla-beta']} release=${prefLists.milestones['mozilla-release']}\n`);
+  }
+
   process.stderr.write('Fetching the vendor changelog for the release...\n');
   // Tests not fully passing in the "to" run, so a changelog entry whose feature is preffed
   // off can be identified as landed-but-not-enabled rather than as missing coverage.
@@ -634,6 +647,18 @@ async function main() {
     netFetch, afterRun.browser_name, majorVersion(afterRun.browser_version),
     rows.filter((r) => r.kind !== 'unchanged'), stillFailing,
   );
+  if (changelog.ok && prefLists.ok) {
+    // A WebAssembly proposal is a binary-format change with no JS API surface, so it has no WPT
+    // coverage in either direction — permanently, by design. Every test-based signal here is
+    // therefore silent about it, and one real pass read that silence as "cannot verify" and
+    // dropped two shipped proposals. The controlling pref is the evidence, so put it on the box.
+    const matches = prefsForBugs(prefLists.lists, changelog.curated, prefLists.milestones);
+    let named = 0;
+    for (const bug of changelog.curated) {
+      if (matches[bug.id]) { bug.prefMatch = matches[bug.id]; named++; }
+    }
+    process.stderr.write(`  resolved a controlling pref for ${named} of ${changelog.curated.length} bug(s).\n`);
+  }
   if (!changelog.ok) {
     process.stderr.write(`note: ${changelog.unsupported ? '' : 'changelog lookup failed — '}${changelog.error}\n`);
   } else {
@@ -653,7 +678,10 @@ async function main() {
   let prefGating = await analysePrefGating(
     rows.filter((r) => r.kind !== 'unchanged' && (r.deltaPass > 0 || r.statusDirection === 'fixed'))
       .map((r) => r.test),
-    { onProgress: (d, n) => process.stderr.write(`  ${d}/${n} directories\r`) },
+    {
+      prefLists: prefLists.ok ? prefLists : null,
+      onProgress: (d, n) => process.stderr.write(`  ${d}/${n} directories\r`),
+    },
   );
   if (prefGating.ok) {
     prefGating = matchPrefsToTests(

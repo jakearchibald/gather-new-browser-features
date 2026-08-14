@@ -123,6 +123,19 @@ if (opts.refresh) {
       console.error(`error: ${fresh.error}`);
       process.exit(1);
     }
+    // Resolve each bug's controlling pref too. For a category WPT cannot cover — a wasm
+    // binary-format change, a network-protocol default — this is the only positive evidence
+    // there is, and without it "no tests" reads as "not a feature".
+    const { fetchPrefLists, prefsForBugs } = require('./lib/prefs.js');
+    const prefLists = await fetchPrefLists();
+    if (prefLists.ok) {
+      const matches = prefsForBugs(prefLists.lists, fresh.curated, prefLists.milestones);
+      let named = 0;
+      for (const bug of fresh.curated) if (matches[bug.id]) { bug.prefMatch = matches[bug.id]; named++; }
+      console.log(`Resolved a controlling pref for ${named} of ${fresh.curated.length} bug(s).`);
+    } else {
+      console.log(`note: no pref evidence (${prefLists.missingTool ? 'searchfox-cli not installed' : prefLists.error}).`);
+    }
     report.changelog = fresh;
     fs.writeFileSync(paths.diff, JSON.stringify(report, null, 2));
     const gaps = fresh.curated.filter((b) => !b.hits.length).length;

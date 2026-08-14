@@ -228,7 +228,13 @@ const result = out.join('\n');
 
 // ---- refuse if the gate would reject what we just wrote ----
 const applied = new Set(toApply.map((t) => t.key));
-const check = verifyChecklist(result);
+let requirePrefEvidence = null;
+try {
+  const diff = JSON.parse(fs.readFileSync(paths.diff, 'utf8'));
+  const curated = (diff.changelog && diff.changelog.ok && diff.changelog.curated) || [];
+  requirePrefEvidence = new Set(curated.filter((b) => b.isShip).map((b) => `bug:${b.id}`));
+} catch { /* older artifact: no policy */ }
+const check = verifyChecklist(result, null, { requirePrefEvidence });
 const badApplied = check.bad.filter((b) => {
   const m = b.line.match(BOX);
   return m && applied.has(m[3]);

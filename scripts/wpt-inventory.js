@@ -164,9 +164,16 @@ if (opts.verify) {
       expected = null;
     }
   }
+  // Enablement bugs get a stricter rule: see CITES_EVIDENCE in lib/render.js.
+  let requirePrefEvidence = null;
+  try {
+    const diff = JSON.parse(fs.readFileSync(paths.diff, 'utf8'));
+    const curated = (diff.changelog && diff.changelog.ok && diff.changelog.curated) || [];
+    requirePrefEvidence = new Set(curated.filter((b) => b.isShip).map((b) => `bug:${b.id}`));
+  } catch { /* an older artifact simply has no policy */ }
   const {
     open, bad, done, total, missing, extra, inventoryChecked,
-  } = verifyChecklist(fs.readFileSync(paths.checklist, 'utf8'), expected);
+  } = verifyChecklist(fs.readFileSync(paths.checklist, 'utf8'), expected, { requirePrefEvidence });
 
   const problems = open.length + bad.length + missing.length + extra.length;
   if (!problems) {
