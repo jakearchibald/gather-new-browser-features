@@ -1150,6 +1150,120 @@ Temporal
   });
 
   // -------------------------------------------------------------------------
+  // Pref gating — nightly-only features are not news
+  // -------------------------------------------------------------------------
+  // The most-suggested comparison is beta -> nightly, which is exactly where nightly-only
+  // features flood the diff. One real 155 pass had 919 of 1585 forward-moving tests pref-gated
+  // and led with attr(), progress() and alpha() — all three nightly-only, all three presented
+  // as shipped. Two mechanisms hide it: WPT force-enables prefs per directory, and a pref's
+  // default is channel-dependent.
+  const PR = require(path.join(SCRIPTS, 'lib', 'prefs.js'));
+  const { prefGatingLines, prefCaveat } = require(path.join(SCRIPTS, 'lib', 'render.js'));
+
+  check('prefs: both gating syntaxes are read', () => {
+    const yaml = [
+      '- name: a.macro.enabled', '  type: bool', '  value: @IS_NIGHTLY_BUILD@', '  mirror: always',
+      '- name: b.plain.enabled', '  type: bool', '  value: true', '  mirror: always',
+      '- name: c.block.enabled', '  type: bool',
+      '#if defined(NIGHTLY_BUILD)', '  value: true', '#else', '  value: false', '#endif',
+      '  mirror: always',
+      // A platform #if is NOT channel gating and must not be read as such.
+      '- name: d.platform.enabled', '  type: bool',
+      '#ifdef XP_WIN', '  value: true', '#else', '  value: false', '#endif',
+    ].join('\n');
+    const m = PR.parseStaticPrefList(yaml);
+    if (!m.get('a.macro.enabled').gated) return 'the @IS_NIGHTLY_BUILD@ macro form was missed';
+    if (m.get('b.plain.enabled').gated) return 'an unconditional pref was called gated';
+    if (!m.get('c.block.enabled').gated) return 'the #ifdef block form was missed';
+    if (m.get('d.platform.enabled').gated) return 'a PLATFORM #ifdef was mistaken for channel gating';
+    return null;
+  });
+
+  check('prefs: mozilla-central alone would invert the answer', () => {
+    // central IS nightly, so a nightly-only pref reads `value: true` there and looks shipped.
+    // The verdict must come from the shipped-channel repos.
+    const per = {
+      'mozilla-central': { nightly: true, shipped: true, raw: 'true', gated: false },
+      'mozilla-beta': { nightly: true, shipped: false, raw: '@IS_NIGHTLY_BUILD@', gated: true },
+      'mozilla-release': { nightly: true, shipped: false, raw: '@IS_NIGHTLY_BUILD@', gated: true },
+    };
+    return PR.verdictFor(per) === 'nightly-only'
+      ? null : `central-looks-shipped resolved to ${PR.verdictFor(per)}`;
+  });
+
+  check('prefs: "off in every channel" is not called nightly-only', () => {
+    const off = { nightly: false, shipped: false, raw: 'false', gated: false };
+    const v = PR.verdictFor({ 'mozilla-central': off, 'mozilla-beta': off, 'mozilla-release': off });
+    if (v !== 'off-by-default') return `expected off-by-default, got ${v}`;
+    // Both are discounted, but the label has to be accurate — the same lesson as :open.
+    return PR.discount(v) ? null : 'off-by-default was not discounted';
+  });
+
+  check('prefs: only "shipped" escapes the discount', () => {
+    const on = { nightly: true, shipped: true, raw: 'true', gated: false };
+    const v = PR.verdictFor({ 'mozilla-beta': on, 'mozilla-release': on, 'mozilla-central': on });
+    if (v !== 'shipped') return `an ungated true pref resolved to ${v}`;
+    if (PR.discount('shipped')) return 'a shipped pref was discounted';
+    for (const other of ['nightly-only', 'off-by-default', 'channel-dependent', 'unclear', 'unknown-pref']) {
+      if (!PR.discount(other)) return `${other} was not discounted`;
+    }
+    return null;
+  });
+
+  check('prefs: a pref matches a path only on WHOLE segments', () => {
+    // `dom.forms.alpha.enabled` matched `css-trans-FORMS/animation` as a substring, and
+    // `full-screen-api.transition-duration.enter` matched `css-transitions`. Both nonsense.
+    const gating = {
+      ok: true,
+      prefs: {
+        'dom.forms.alpha.enabled': { pref: 'dom.forms.alpha.enabled', verdict: 'nightly-only', per: {} },
+        'layout.css.typed-om.enabled': { pref: 'layout.css.typed-om.enabled', verdict: 'nightly-only', per: {} },
+      },
+      forced: [],
+    };
+    const rows = [
+      { test: '/css/css-transforms/animation/foo.html' },
+      { test: '/css/css-typed-om/the-stylepropertymap/bar.html' },
+    ];
+    const g = PR.matchPrefsToTests(gating, rows);
+    const byTest = Object.fromEntries(g.gatedTests.map((x) => [x.test, x.prefs]));
+    if (byTest['/css/css-transforms/animation/foo.html']) {
+      return `"forms" matched inside "transforms": ${byTest['/css/css-transforms/animation/foo.html']}`;
+    }
+    return (byTest['/css/css-typed-om/the-stylepropertymap/bar.html'] || []).includes('layout.css.typed-om.enabled')
+      ? null : 'typed-om did not match its own directory';
+  });
+
+  check('prefs: generic pref words do not associate', () => {
+    // `layout.css.webkit-line-clamp.skip-paint` flagged /touch-events on the word "webkit",
+    // and `dom.element.blocking.enabled` flagged half of /html on "element".
+    for (const pref of ['dom.element.blocking.enabled', 'dom.forms.alpha.enabled']) {
+      const toks = PR.prefTokens(pref);
+      const generic = toks.filter((t) => PR.GENERIC.has(t));
+      if (generic.length) return `${pref} still yields generic token(s): ${generic.join(', ')}`;
+    }
+    return null;
+  });
+
+  check('prefs: a missing searchfox-cli is reported, never read as "nothing gated"', () => {
+    for (const [label, g] of [
+      ['absent', undefined],
+      ['missing tool', { ok: false, missingTool: true, error: 'searchfox-cli is not installed' }],
+      ['failed', { ok: false, error: 'boom' }],
+    ]) {
+      const section = prefGatingLines(g).join(' ');
+      const caveat = prefCaveat(g).join(' ');
+      if (!/NOT CHECKED/.test(section)) return `${label}: the report section did not say so`;
+      if (!caveat.length) return `${label}: the inventory carried no caveat`;
+      if (/nothing gated|no nightly/i.test(section)) return `${label}: read as "nothing gated"`;
+    }
+    // ...and the missing-tool case must name the fix.
+    const t = prefGatingLines({ ok: false, missingTool: true, error: 'x' }).join(' ');
+    return /searchfox-cli/.test(t) && /cargo binstall/.test(t)
+      ? null : 'the missing-tool message does not name the install command';
+  });
+
+  // -------------------------------------------------------------------------
   // The vendor changelog — feature -> test, the only source running that way
   // -------------------------------------------------------------------------
   // Two real misses on one release, in opposite directions, both invisible to every other
@@ -1385,6 +1499,8 @@ function outputSizeChecks(dir) {
     ['wpt-bugs.js', []],
     ['wpt-bugs.js', ['--census']],
     ['wpt-bugs.js', ['--component', 'Layout']],
+    ['wpt-prefs.js', []],
+    ['wpt-prefs.js', ['--gated']],
   ];
   for (const [script, args] of cases) {
     check(`output fits or pages: ${script} ${args.join(' ')}`.trim(), () => {
@@ -1429,6 +1545,7 @@ function outputSizeChecks(dir) {
       ['wpt-report.js', []],
       ['wpt-js-gaps.js', ['--stored']],
       ['wpt-bugs.js', []],
+      ['wpt-prefs.js', []],
     ];
     // Only wpt-runs.js and wpt-collect.js operate without an artifact; everything else
     // needs one named. Suggested commands used to omit it, relying on "there is only one
@@ -1436,7 +1553,7 @@ function outputSizeChecks(dir) {
     // then every "continue with" line fails with "name the one you mean", exactly when
     // someone is working across two. Asserting the property here rather than staging a
     // second artifact, since the property is what has to hold.
-    const NEEDS_ARTIFACT = /node scripts\/wpt-(inventory|report|subtests|grep|state|fetch-tests|resolve|js-gaps|bugs)\.js/;
+    const NEEDS_ARTIFACT = /node scripts\/wpt-(inventory|report|subtests|grep|state|fetch-tests|resolve|js-gaps|bugs|prefs)\.js/;
     const offenders = [];
     for (const [script, args] of probes) {
       let out;

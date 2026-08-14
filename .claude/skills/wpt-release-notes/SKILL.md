@@ -455,6 +455,56 @@ reachable by component or substring with no further network access, so the bound
 navigable rather than silent. That is the same bargain `--part` makes with the inventory.
 Non-Firefox comparisons get `NOT APPLICABLE`, since Bugzilla milestones only describe Firefox.
 
+## Step 2c: Discount nightly-only features — they are not news
+
+**By default, a feature that is not on for beta/release users does not go in the notes.**
+Include one only if you were explicitly asked to cover what is coming in nightly, and then
+say so in its own clearly-labelled section.
+
+This is not a nicety. The skill's most-suggested comparison is
+`--from firefox@beta --to firefox@nightly`, which is *exactly* where nightly-only features
+flood the diff — on one real 155 pass **967 of 1585 forward-moving tests were pref-gated**,
+and the notes led with `attr()`, `progress()` and `alpha()`, all three nightly-only, all three
+presented as shipped.
+
+Two mechanisms hide it, and neither is visible in a pass rate:
+
+1. **WPT force-enables prefs.** `testing/web-platform/meta/<dir>/__dir__.ini` carries
+   `prefs: [layout.css.typed-om.enabled:true]` and the harness applies it. So **a passing test
+   means "implemented", not "a user has it"** — including in a beta run.
+2. **The pref's default is channel-dependent**, as `value: @IS_NIGHTLY_BUILD@` or an
+   `#ifdef NIGHTLY_BUILD` block in `StaticPrefList.yaml`.
+
+The collector resolves both through searchfox and **marks the directory line**, in the
+inventory and on the worksheet box:
+
+```
+/css/css-typed-om  [14 files, +452 subtests, 14 fwd, 8 done]  [NIGHTLY-ONLY: layout.css.typed-om.enabled +16, 390f]
+    !! On in nightly, OFF for beta/release users. DISCOUNT from the notes unless asked.
+```
+
+| Marker | Means |
+| --- | --- |
+| *(none)* | Nothing here is pref-gated. Write it up normally. |
+| `NIGHTLY-ONLY` | On in nightly, off for beta/release. **Discount.** Verdict: `not a feature: nightly-only (<pref>)`. |
+| `OFF by default everywhere` | Off in *every* channel including nightly; the test only passes because WPT forced it. **Discount.** |
+| `channel-dependent value` / `pref state unclear` / `pref not found` | Could not be resolved. Treat as a lead, check the pref by hand, and do not present it as available. |
+
+The pref-to-directory association is a **lead**, matched on whole path segments — it named the
+right pref for `css-typed-om`, `progress()` and `alpha()`, and earlier looser matching flagged
+`touch-events` from a line-clamp pref. So confirm before discounting something that looks real,
+and read the evidence with:
+
+```bash
+node scripts/wpt-prefs.js            # every pref, its value in central/beta/release
+node scripts/wpt-prefs.js --gated    # the gated files, by directory
+```
+
+**If `searchfox-cli` is not installed, none of this can run**, every view says so loudly, and
+the honest response is to state in the notes that pref state is unverified rather than to
+present anything as available. Install it with `cargo binstall searchfox-cli`, then
+`node scripts/wpt-prefs.js --refresh`.
+
 ## Step 3: Find the *cause* — read the subtest messages
 
 **A subtest count names a file, not a cause.** This is the step that most changes what
@@ -702,9 +752,12 @@ added, suspect this before believing it — and sanity-check that the total is ~
 
 **`tentative` in a path means the spec is unstable.** Flag these as experimental.
 
-**Nightly ≠ shipped.** Features may be behind a pref. WPT shows what runs in the
-harness, not what users have. State this caveat, and if the notes are going anywhere
-public, say that pref status needs checking against Bugzilla or release notes.
+**Nightly ≠ shipped, and it is now measured rather than caveated.** WPT shows what runs in
+the harness, and the harness force-enables prefs — so a pass can mean "implemented" for a
+feature no user has. Step 2c resolves each one against `StaticPrefList.yaml` across
+mozilla-central/-beta/-release and marks the directory. Discount anything marked, unless you
+were asked for what is coming in nightly. Where the check could not run, say pref state is
+unverified rather than implying availability.
 
 ## Step 6: Write the notes
 

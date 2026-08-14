@@ -12,6 +12,7 @@ const {
   dirOf, fmtSide, clip, signed, needsQuoting, shellQuote, toSourcePath,
 } = require('./wpt.js');
 const { messageRollup, detectRenames } = require('./analyse.js');
+const { dirMarker, discount, VERDICT_LABEL } = require('./prefs.js');
 
 function pct(n) {
   return `${(n * 100).toFixed(3)}%`;
@@ -445,6 +446,88 @@ function jsHorizonLines(h) {
 }
 
 /**
+ * The lines that stop a missing pref check reading as "nothing is nightly-only".
+ *
+ * Loud by design. Without searchfox-cli there is no way to tell a shipped feature from a
+ * nightly-only one, and the whole diff then reads as shipped — which is the failure this
+ * check exists for, so its absence has to be at least as visible as its findings.
+ */
+function prefCaveat(g) {
+  if (!g) {
+    return ['This artifact predates the pref-gating check, so whether these features are',
+      'nightly-only is UNKNOWN. Re-collect, or: node scripts/wpt-prefs.js --refresh'];
+  }
+  if (g.missingTool) {
+    return ['!! searchfox-cli IS NOT INSTALLED, so NOTHING below is known to be available to',
+      '!! users. WPT force-enables prefs per directory, so a passing test can be a',
+      '!! nightly-only feature. Install it (cargo binstall searchfox-cli) and run',
+      '!! node scripts/wpt-prefs.js --refresh, or treat every feature here as UNVERIFIED.'];
+  }
+  if (!g.ok) {
+    return [`The pref-gating check failed (${g.error}), so nightly-only features are NOT`,
+      'marked below. Treat pref state as unverified.'];
+  }
+  const n = (g.gatedTests || []).length;
+  if (!n) return [];
+  return [`${n} of the files below are gated by a pref a beta/release user does not have, and`,
+    'are marked on their directory line. DISCOUNT those from the notes unless asked otherwise.'];
+}
+
+/**
+ * The pref-gating section: which prefs gate what, and which are nightly-only.
+ */
+function prefGatingLines(g) {
+  const L = [];
+  const p = (s = '') => L.push(s);
+  p('## Pref gating (which features a shipped-channel user actually has)');
+  if (!g) {
+    p('# NOT CHECKED — this artifact predates the check. Re-collect to measure it.');
+    p('');
+    return L;
+  }
+  if (g.missingTool) {
+    p('# NOT CHECKED — searchfox-cli is not installed, and it is the only way to tell a');
+    p('# shipped feature from a nightly-only one. Every feature in this comparison is');
+    p('# therefore UNVERIFIED: WPT force-enables prefs per directory, so a passing test does');
+    p('# not mean a user has the feature. Install it and re-run:');
+    p('#   cargo binstall searchfox-cli && node scripts/wpt-prefs.js --refresh');
+    p('');
+    return L;
+  }
+  if (!g.ok) {
+    p(`# NOT CHECKED — ${g.error}. Pref state is unverified.`);
+    p('');
+    return L;
+  }
+  const byVerdict = {};
+  for (const info of Object.values(g.prefs)) {
+    (byVerdict[info.verdict] = byVerdict[info.verdict] || []).push(info);
+  }
+  const gated = (g.gatedTests || []).length;
+  p(`# ${g.dirsProbed} directories probed; ${g.forced.length} force prefs on via`);
+  p('# testing/web-platform/meta/<dir>/__dir__.ini, which is why a test can pass for a');
+  p('# feature the channel does not enable. Pref defaults read from StaticPrefList.yaml in');
+  p('# mozilla-central, -beta and -release, because central IS nightly and reading it alone');
+  p('# makes every nightly-only pref look shipped.');
+  p(`# ${gated} forward-moving test(s) are gated by a pref a beta/release user does not have.`);
+  p('');
+  for (const verdict of ['nightly-only', 'off-by-default', 'channel-dependent', 'unclear', 'unknown-pref', 'shipped']) {
+    const list = byVerdict[verdict];
+    if (!list || !list.length) continue;
+    p(`  ${VERDICT_LABEL[verdict]} (${list.length})${discount(verdict) ? '  <- DISCOUNT these' : ''}:`);
+    for (const info of list.slice(0, 14)) {
+      const per = info.per;
+      const show = (r) => (per[r] ? per[r].raw : 'absent');
+      p(`    ${info.pref}`);
+      p(`        central=${show('mozilla-central')}  beta=${show('mozilla-beta')}  release=${show('mozilla-release')}`);
+    }
+    if (list.length > 14) p(`    ... and ${list.length - 14} more`);
+    p('');
+  }
+  return L;
+}
+
+/**
  * The two or three lines that stop the inventory reading as a completeness guarantee
  * for JavaScript. Short by design — it appears above every page of every listing.
  */
@@ -459,12 +542,21 @@ function jsHorizonCaveat(h) {
   }
   if (!h.missing.length && !(h.revendored || []).length) return [];
   const lag = h.lagDays === null ? 'of unknown age' : `${h.lagDays} days behind upstream`;
-  return [
-    `BUT test262 is VENDORED into WPT — this snapshot is ${lag},`,
-    `so reading every line below still cannot surface ${h.missing.length} JS feature(s) that have`,
-    'no test in either run. Those are boxed at the end of checklist.md, and listed by',
-    'wpt-report.js --section javascript.',
-  ];
+  const rev = (h.revendored || []).length;
+  const out = [`BUT test262 is VENDORED into WPT — this snapshot is ${lag}.`];
+  // Both counts, because this fired on either and reported only the first: with a current
+  // snapshot and a re-vendor between the runs it read "cannot surface 0 JS feature(s)", which
+  // is the same conflation of the two classes that the boxes had.
+  if (h.missing.length) {
+    out.push(`Reading every line below cannot surface ${h.missing.length} JS feature(s) with no test in`,
+      'either run.');
+  }
+  if (rev) {
+    out.push(`${rev} more arrived BETWEEN the two runs, so their tests exist on one side only and`,
+      'the worksheet pre-resolves them as churn.');
+  }
+  out.push('Both are boxed at the end of checklist.md, and listed by wpt-report.js --section javascript.');
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -802,6 +894,7 @@ function renderReport(report, { top = 40 } = {}) {
   }
 
   for (const line of changelogLines(report.changelog)) p(line);
+  for (const line of prefGatingLines(report.prefGating)) p(line);
 
   if (report.vocabulary && report.vocabulary.length) {
     p('## One feature, several directories (shared newly-passing subtest words)');
@@ -838,10 +931,20 @@ function renderReport(report, { top = 40 } = {}) {
  * nothing and sorts alphabetically.
  */
 /** One directory's block: its header line, and its files with their evidence. */
-function groupLines(g, dirsOnly) {
+function groupLines(g, dirsOnly, gating = null) {
   const out = [];
   const allChurn = g.churn === g.rows.length ? '  <- all test-suite churn' : '';
-  out.push(`${g.dir}  [${g.rows.length} file${g.rows.length === 1 ? '' : 's'}, ${signed(g.deltaPass)} subtests, ${dirBits(g)}]${allChurn}`);
+  // The pref marker goes on the directory header, which is the line a reader decides from —
+  // in --dirs, in the full listing, and in the worksheet. A feature whose tests only pass
+  // because WPT forced a pref on is not something a user has.
+  const marker = dirMarker(gating, g.dir.replace(/^\//, ''));
+  out.push(`${g.dir}  [${g.rows.length} file${g.rows.length === 1 ? '' : 's'}, ${signed(g.deltaPass)} subtests, ${dirBits(g)}]${allChurn}${marker ? `  ${marker.text}` : ''}`);
+  if (marker) {
+    out.push(`    !! ${marker.files} file(s) here are gated by ${marker.prefs.slice(0, 3).join(', ')}${marker.prefs.length > 3 ? ` +${marker.prefs.length - 3}` : ''}`);
+    out.push(`    !! ${marker.verdict === 'nightly-only'
+      ? 'On in nightly, OFF for beta/release users. DISCOUNT from the notes unless asked.'
+      : `${marker.label}. WPT forced it on, so passing does NOT mean a user has it.`}`);
+  }
   if (dirsOnly) return out;
   for (const r of g.rows) {
     const flag = completed(r)
@@ -893,7 +996,7 @@ function renderInventory(report, tests, {
   const L = [];
   const p = (s = '') => L.push(s);
   const groups = groupByDir(tests);
-  const blocks = groups.map((g) => ({ g, lines: groupLines(g, dirsOnly) }));
+  const blocks = groups.map((g) => ({ g, lines: groupLines(g, dirsOnly, report.prefGating) }));
 
   // --dirs is paginated too. It is one line per directory, which looks like it
   // always fits — but that is ~71 bytes each, and a two-release diff runs to
@@ -935,6 +1038,7 @@ function renderInventory(report, tests, {
   // cadence, so reading this listing to the last line still cannot surface a JS
   // feature whose tests postdate the snapshot. Three did on one real comparison.
   for (const line of jsHorizonCaveat(report.jsHorizon)) p(line);
+  for (const line of prefCaveat(report.prefGating)) p(line);
   if (!dirsOnly && navHint) {
     p('');
     p(`This is ${groups.length} directories and ${tests.length} files. Navigate it with the flags below,`);
@@ -1057,6 +1161,13 @@ function renderChecklist(report, tests, { dir = '' } = {}) {
   if (jsGaps.length) {
     p(`${jsGaps.length} JavaScript feature(s) have no test here at all and are boxed at the end.`);
   }
+  const pg = report.prefGating;
+  if (pg && pg.ok && (pg.gatedTests || []).length) {
+    p(`${pg.gatedTests.length} file(s) are gated by a pref beta/release users do not have; their`);
+    p('directories are marked. Discount those unless you were asked to include them.');
+  } else if (pg && (pg.missingTool || !pg.ok)) {
+    p('!! Pref gating was NOT checked, so nothing here is known to be available to users.');
+  }
   p('');
   p('Work top to bottom. Replace EVERY box with an x and append " — <verdict>",');
   p('where the verdict is one of:');
@@ -1072,7 +1183,14 @@ function renderChecklist(report, tests, { dir = '' } = {}) {
   p('A 5-file all-done directory was skipped that way once.');
   p('');
   for (const g of needsVerdict) {
-    p(`[ ] ${g.dir}  (${g.rows.length}f, ${signed(g.deltaPass)}, ${dirBits(g)})`);
+    const marker = dirMarker(report.prefGating, g.dir.replace(/^\//, ''));
+    p(`[ ] ${g.dir}  (${g.rows.length}f, ${signed(g.deltaPass)}, ${dirBits(g)})${marker ? `  ${marker.text}` : ''}`);
+    if (marker) {
+      p(`      ${marker.verdict === 'nightly-only'
+        ? 'NIGHTLY-ONLY — not available to beta/release users. The right verdict is normally'
+        : `${marker.label} — WPT forced the pref on, so passing does not mean a user has it.`}`);
+      p(`      "not a feature: ${marker.verdict === 'nightly-only' ? 'nightly-only' : marker.verdict} (${marker.prefs[0]})" unless you were asked to include these.`);
+    }
   }
   p('');
   p(`--- pre-resolved as churn (${churnOnly.length}), no verdict needed ---`);
@@ -1918,4 +2036,5 @@ module.exports = {
   messageNamesSomething, CATEGORIES, jsBoxPath, jsGapBoxes, jsHorizonLines,
   jsChecklistLines, jsFinding, jsFyiLines, jsUpstreamLines, jsHorizonCaveat,
   changelogLines, bugChecklistLines, bugGapBoxes, bugFinding, bugBoxPath,
+  prefGatingLines, prefCaveat,
 };

@@ -87,6 +87,7 @@ const { fetchCoverageHorizon } = require('./lib/test262.js');
 const { whatShipped, sourceFor, majorVersion } = require('./lib/shipped.js');
 const { fetchResults } = require('./lib/test262fyi.js');
 const { fetchChangelog } = require('./lib/changelog.js');
+const { analysePrefGating, matchPrefsToTests, haveSearchfox } = require('./lib/prefs.js');
 const artifact = require('./lib/artifact.js');
 const { usage, num, unknownOption } = require('./lib/cli.js');
 const { classify, statusDirection, areaOf, revisionResolver } = require('./lib/wpt.js');
@@ -103,7 +104,10 @@ const RUN_CANDIDATES = 5;
 const VERSION_RUN_CANDIDATES = 200;
 // Separate from the search window above: widening the search is one cheap
 // /api/runs call, but every probe is a ~20MB summary download.
-const MAX_SUMMARY_PROBES = 5;
+// Raised from 5: a nightly that has just merged to the next version attracts a
+// burst of single-test retriggers, and 5 partial runs at the top of the list
+// blocked an otherwise-collectable comparison (firefox 155.0a1, 2026-08-14).
+const MAX_SUMMARY_PROBES = 12;
 // A full WPT run is ~120k test files. Anything far below this is a partial run
 // that would otherwise yield a diff claiming every test was removed.
 const MIN_TESTS = 10000;
@@ -640,6 +644,34 @@ async function main() {
     );
   }
 
+  // ---- which of these a shipped-channel user actually has ----
+  // The most-suggested comparison is beta -> nightly, which is exactly where nightly-only
+  // features flood the diff: on one real 155 pass 877 of 1585 forward-moving tests were gated,
+  // and the notes led with three nightly-only features presented as shipped. WPT force-enables
+  // prefs per directory, so a pass means "implemented", not "available".
+  process.stderr.write('Checking which features are pref-gated (searchfox)...\n');
+  let prefGating = await analysePrefGating(
+    rows.filter((r) => r.kind !== 'unchanged' && (r.deltaPass > 0 || r.statusDirection === 'fixed'))
+      .map((r) => r.test),
+    { onProgress: (d, n) => process.stderr.write(`  ${d}/${n} directories\r`) },
+  );
+  if (prefGating.ok) {
+    prefGating = matchPrefsToTests(
+      prefGating,
+      rows.filter((r) => r.kind !== 'unchanged'),
+    );
+    const gated = prefGating.gatedTests.length;
+    const nightly = Object.values(prefGating.prefs).filter((x) => x.verdict === 'nightly-only').length;
+    process.stderr.write(
+      `  ${gated} forward-moving test(s) are gated by a pref a shipped-channel user does not `
+        + `have (${nightly} nightly-only pref(s)).\n`,
+    );
+  } else if (prefGating.missingTool) {
+    process.stderr.write('  !! searchfox-cli NOT INSTALLED — nightly-only features cannot be identified.\n');
+  } else {
+    process.stderr.write(`  note: pref-gating check failed (${prefGating.error})\n`);
+  }
+
   const report = {
     generated: new Date().toISOString(),
     aligned: opts.aligned,
@@ -651,6 +683,8 @@ async function main() {
     jsHorizon,
     // The vendor's own list of what shipped, matched against the diff. See lib/changelog.js.
     changelog,
+    // Which changed tests only pass because WPT forced a pref on. See lib/prefs.js.
+    prefGating,
     before: {
       spec: opts.fromSpec.label,
       product: beforeRun.browser_name,
@@ -809,6 +843,27 @@ async function main() {
     console.log('      have shipped and be invisible in every view here, at every pass rate.');
     console.log('      They are boxed in checklist.md and gated by --verify. Read them with:');
     console.log(`        node scripts/wpt-report.js ${rel} --section javascript`);
+  }
+  if (prefGating && prefGating.missingTool) {
+    // Deliberately the loudest thing this command prints. Without it, every nightly-only
+    // feature reads as shipped — the failure that motivated the check — and the absence of the
+    // tool is invisible unless it is said here, at the end, in these terms.
+    console.log('');
+    console.log('!! ==================================================================');
+    console.log('!! searchfox-cli IS NOT INSTALLED, AND THESE NOTES WILL BE WRONG.');
+    console.log('!! ==================================================================');
+    console.log('!! It is the only way to tell a shipped feature from a nightly-only one.');
+    console.log('!! WPT force-enables prefs per directory, so a test passing does NOT mean a');
+    console.log('!! user has the feature. On one real beta->nightly diff, 877 of 1585');
+    console.log('!! forward-moving tests were gated, and three headline "features" were');
+    console.log('!! nightly-only. You cannot tell which, from this artifact, without it.');
+    console.log('!!');
+    console.log('!!   cargo binstall searchfox-cli     (or: cargo install searchfox-cli)');
+    console.log('!!   node scripts/wpt-prefs.js --refresh    then re-read the inventory');
+    console.log('!!');
+    console.log('!! Until then: say in the notes that pref state is UNVERIFIED, and do not');
+    console.log('!! present anything as available to users.');
+    console.log('');
   }
   if (report.before.wpt_revision !== report.after.wpt_revision) {
     // Quantified, because "some of this diff" is unactionable and the real figure is
