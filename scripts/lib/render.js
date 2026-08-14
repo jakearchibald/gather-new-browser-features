@@ -460,7 +460,7 @@ function prefCaveat(g) {
   if (g.missingTool) {
     return ['!! searchfox-cli IS NOT INSTALLED, so NOTHING below is known to be available to',
       '!! users. WPT force-enables prefs per directory, so a passing test can be a',
-      '!! nightly-only feature. Install it (cargo binstall searchfox-cli) and run',
+      '!! nightly-only feature. Install it (cargo install searchfox-cli) and run',
       '!! node scripts/wpt-prefs.js --refresh, or treat every feature here as UNVERIFIED.'];
   }
   if (!g.ok) {
@@ -490,7 +490,8 @@ function prefGatingLines(g) {
     p('# shipped feature from a nightly-only one. Every feature in this comparison is');
     p('# therefore UNVERIFIED: WPT force-enables prefs per directory, so a passing test does');
     p('# not mean a user has the feature. Install it and re-run:');
-    p('#   cargo binstall searchfox-cli && node scripts/wpt-prefs.js --refresh');
+    p('#   cargo install searchfox-cli   (or, if you have it, cargo binstall)');
+    p('#   node scripts/wpt-prefs.js --refresh');
     p('');
     return L;
   }
@@ -504,6 +505,14 @@ function prefGatingLines(g) {
     (byVerdict[info.verdict] = byVerdict[info.verdict] || []).push(info);
   }
   const gated = (g.gatedTests || []).length;
+  if (g.tool && g.tool.outdated) {
+    // A stale resolver is a silent weakness of exactly the kind this check exists to catch.
+    p(`# !! searchfox-cli ${g.tool.version} is OUTDATED (latest ${g.tool.latest}). The pref verdicts`);
+    p('# !! below came from it. Update and re-run before trusting them:');
+    p('# !!   cargo install searchfox-cli && node scripts/wpt-prefs.js --refresh');
+  } else if (g.tool && g.tool.version) {
+    p(`# resolved with searchfox-cli ${g.tool.version}`);
+  }
   p(`# ${g.dirsProbed} directories probed; ${g.forced.length} force prefs on via`);
   p('# testing/web-platform/meta/<dir>/__dir__.ini, which is why a test can pass for a');
   p('# feature the channel does not enable. Pref defaults read from StaticPrefList.yaml in');

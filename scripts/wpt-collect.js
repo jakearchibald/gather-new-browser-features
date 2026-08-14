@@ -858,7 +858,8 @@ async function main() {
     console.log('!! forward-moving tests were gated, and three headline "features" were');
     console.log('!! nightly-only. You cannot tell which, from this artifact, without it.');
     console.log('!!');
-    console.log('!!   cargo binstall searchfox-cli     (or: cargo install searchfox-cli)');
+    console.log('!!   cargo install searchfox-cli      (cargo-binstall is a separate tool and');
+    console.log('!!                                     is often not present — this always works)');
     console.log('!!   node scripts/wpt-prefs.js --refresh    then re-read the inventory');
     console.log('!!');
     console.log('!! Until then: say in the notes that pref state is UNVERIFIED, and do not');

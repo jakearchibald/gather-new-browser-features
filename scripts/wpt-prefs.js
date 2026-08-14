@@ -23,7 +23,7 @@
  *   --part <n>   which page (default 1)
  *   --all        every page at once
  *
- * Needs searchfox-cli for --refresh (`cargo binstall searchfox-cli`). Without it the check
+ * Needs searchfox-cli for --refresh (`cargo install searchfox-cli`). Without it the check
  * cannot run at all, and every view says so loudly rather than reporting "nothing gated" —
  * the two must never look the same.
  */
@@ -69,7 +69,7 @@ async function main() {
     if (!g.ok) {
       console.error(`\nerror: ${g.error}`);
       if (g.missingTool) {
-        console.error('Install it, then re-run:  cargo binstall searchfox-cli');
+        console.error('Install it, then re-run:  cargo install searchfox-cli');
       }
       return 1;
     }

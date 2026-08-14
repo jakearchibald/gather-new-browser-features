@@ -64,11 +64,37 @@ const CHANNEL_MACROS = {
 };
 const CHANNEL_COND = /\b(NIGHTLY_BUILD|EARLY_BETA_OR_EARLIER|RELEASE_OR_BETA|MOZ_DEV_EDITION)\b/;
 
-/** Is searchfox-cli on PATH? Everything here needs it. */
-function haveSearchfox() {
+/**
+ * Is searchfox-cli on PATH, and is it current?
+ *
+ * Judged on OUTPUT, not the exit code. The binary self-reports when a newer release exists,
+ * and tying "is it installed" to a zero exit risks reporting a merely-outdated tool as
+ * missing — which would swap the loudest warning here for the wrong one. Matching the version
+ * banner cannot make that mistake.
+ *
+ * The version is recorded because a stale tool is a silent weakness of exactly the kind this
+ * check exists to prevent: if an older release resolved `-R mozilla-beta` differently, the
+ * pref verdicts would be wrong with nothing to show it.
+ */
+function searchfoxVersion() {
   return new Promise((resolve) => {
-    execFile('searchfox-cli', ['--help'], { timeout: 15_000 }, (err) => resolve(!err));
+    execFile('searchfox-cli', ['--version'], { timeout: 15_000 }, (err, stdout, stderr) => {
+      const text = `${stdout || ''}\n${stderr || ''}`;
+      const m = text.match(/searchfox-cli\s+(\d+\.\d+\.\d+)/);
+      if (!m) return resolve({ present: false, version: null, outdated: false, latest: null });
+      const nag = text.match(/latest:\s*(\d+\.\d+\.\d+)/);
+      resolve({
+        present: true,
+        version: m[1],
+        outdated: !!nag && nag[1] !== m[1],
+        latest: nag ? nag[1] : null,
+      });
+    });
   });
+}
+
+async function haveSearchfox() {
+  return (await searchfoxVersion()).present;
 }
 
 function run(args) {
@@ -83,7 +109,11 @@ function run(args) {
   });
 }
 
-/** searchfox-cli prints an upgrade nag on stdout; it is not file content. */
+/**
+ * searchfox-cli prints an upgrade nag on stdout when a newer release exists; it is not file
+ * content. Dormant while the install is current, and NOT dead code — it returns the moment
+ * upstream publishes a release.
+ */
 function clean(text) {
   return String(text || '')
     .split('\n')
@@ -199,10 +229,12 @@ function ancestorsOf(testPath) {
  * did not run" must never look the same.
  */
 async function analysePrefGating(tests, { concurrency = 8, onProgress } = {}) {
-  if (!(await haveSearchfox())) {
+  const tool = await searchfoxVersion();
+  if (!tool.present) {
     return {
       ok: false,
       missingTool: true,
+      tool,
       error: 'searchfox-cli is not installed, so nightly-only features CANNOT be identified',
     };
   }
@@ -243,12 +275,13 @@ async function analysePrefGating(tests, { concurrency = 8, onProgress } = {}) {
     return {
       ok: true,
       checkedAt: new Date().toISOString(),
+      tool,
       dirsProbed: dirs.length,
       forced: [...forced.entries()].map(([dir, names]) => ({ dir, prefs: names })),
       prefs,
     };
   } catch (err) {
-    return { ok: false, error: String((err && err.message) || err) };
+    return { ok: false, tool, error: String((err && err.message) || err) };
   }
 }
 
@@ -437,7 +470,7 @@ function nightlyOnlyTests(gating) {
 }
 
 module.exports = {
-  haveSearchfox, parseStaticPrefList, parseDirIni, analysePrefGating, verdictFor,
+  haveSearchfox, searchfoxVersion, parseStaticPrefList, parseDirIni, analysePrefGating, verdictFor,
   prefsForTest, nightlyOnlyTests, ancestorsOf, discount, dirMarker, matchPrefsToTests,
   prefTokens, words, VERDICT_LABEL, REPOS, CHANNEL_MACROS, GENERIC,
 };

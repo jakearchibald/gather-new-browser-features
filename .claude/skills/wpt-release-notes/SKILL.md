@@ -502,8 +502,16 @@ node scripts/wpt-prefs.js --gated    # the gated files, by directory
 
 **If `searchfox-cli` is not installed, none of this can run**, every view says so loudly, and
 the honest response is to state in the notes that pref state is unverified rather than to
-present anything as available. Install it with `cargo binstall searchfox-cli`, then
-`node scripts/wpt-prefs.js --refresh`.
+present anything as available:
+
+```bash
+cargo install searchfox-cli          # cargo-binstall is a separate tool, often absent
+node scripts/wpt-prefs.js --refresh
+```
+
+Keep it current, too. It self-reports when a newer release exists, and the pref section prints
+the version it resolved with — an outdated resolver is the same class of silent weakness as no
+resolver at all, so a stale one is called out rather than trusted.
 
 ## Step 3: Find the *cause* — read the subtest messages
 

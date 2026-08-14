@@ -1245,6 +1245,36 @@ Temporal
     return null;
   });
 
+  check('prefs: an outdated resolver is called out, not silently trusted', () => {
+    // A stale searchfox-cli is the same class of silent weakness as a missing one: if an older
+    // release resolved `-R mozilla-beta` differently, every pref verdict would be wrong with
+    // nothing on screen to say so.
+    const g = {
+      ok: true, dirsProbed: 10, forced: [], prefs: {}, gatedTests: [],
+      tool: { present: true, version: '0.18.0', outdated: true, latest: '0.20.3' },
+    };
+    const text = prefGatingLines(g).join(' ');
+    if (!/OUTDATED/.test(text)) return 'an outdated resolver was not called out';
+    if (!/0\.18\.0/.test(text) || !/0\.20\.3/.test(text)) return 'the versions were not named';
+    // A current one is simply recorded, not warned about.
+    const cur = prefGatingLines({
+      ...g, tool: { present: true, version: '0.20.3', outdated: false, latest: null },
+    }).join(' ');
+    return /resolved with searchfox-cli 0\.20\.3/.test(cur) && !/OUTDATED/.test(cur)
+      ? null : 'a current resolver was not recorded, or was wrongly warned about';
+  });
+
+  check('prefs: presence is judged on output, not exit code', () => {
+    // Tying "is it installed" to a zero exit risks reporting a merely-outdated tool as MISSING,
+    // which swaps the loudest warning in the toolkit for the wrong one. The version banner is
+    // what proves the binary ran.
+    const src = fs.readFileSync(path.join(SCRIPTS, 'lib', 'prefs.js'), 'utf8');
+    const fn = src.slice(src.indexOf('function searchfoxVersion'), src.indexOf('async function haveSearchfox'));
+    if (/resolve\(!err\)/.test(fn)) return 'presence is still derived from the exit code';
+    return /searchfox-cli\\s\+/.test(fn) || /searchfox-cli/.test(fn)
+      ? null : 'the version banner is not what determines presence';
+  });
+
   check('prefs: a missing searchfox-cli is reported, never read as "nothing gated"', () => {
     for (const [label, g] of [
       ['absent', undefined],
@@ -1259,8 +1289,8 @@ Temporal
     }
     // ...and the missing-tool case must name the fix.
     const t = prefGatingLines({ ok: false, missingTool: true, error: 'x' }).join(' ');
-    return /searchfox-cli/.test(t) && /cargo binstall/.test(t)
-      ? null : 'the missing-tool message does not name the install command';
+    return /searchfox-cli/.test(t) && /cargo install searchfox-cli/.test(t)
+      ? null : 'the missing-tool message does not name a WORKING install command';
   });
 
   // -------------------------------------------------------------------------
