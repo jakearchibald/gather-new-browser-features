@@ -236,34 +236,6 @@ release-notes/         finished notes (gitignored — regenerable, and stale as 
 `selftest.js` needs two artifacts to run against; see its `--help` for the two commands
 that collect them.
 
-## Running it without permission prompts
-
-`.claude/settings.json` is committed, so a clone is quiet with no per-user setup. It runs
-Bash in Claude Code's sandbox and auto-allows it on that basis, which is why there are
-almost no prompts. What the committed file actually gives you:
-
-- **Writes** confined to `tmp/` and `release-notes/`.
-- **Credentials** (`~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.npmrc`, `~/.netrc`) unreadable
-  from inside the sandbox, so a 330MB stream from the network can't become an exfiltration
-  path.
-- `failIfUnavailable: true` — a machine that can't start the sandbox fails loudly rather
-  than quietly running commands unconfined. On a platform without sandbox support, drop
-  that line knowingly rather than wondering why nothing starts.
-
-**Egress is NOT confined by the committed file.** `allowedDomains` is listed there, but
-`sandbox.network.strictAllowlist` is required to enforce it and is deliberately ignored from
-project settings — otherwise a repo you cloned could rewrite your egress policy. Verified:
-with the committed config alone, `example.com` and `pypi.org` are both reachable. To get
-real confinement to the four hosts this repo uses, pass the committed flag file:
-
-```bash
-claude --settings .claude/strict-sandbox.json
-```
-
-Or put `{"sandbox":{"network":{"strictAllowlist":true}}}` in your own
-`~/.claude/settings.json`, where it applies to every project but only bites where a sandbox
-is actually enabled.
-
 ## Reference
 
 - wpt.fyi API: https://github.com/web-platform-tests/wpt.fyi/blob/main/api/README.md

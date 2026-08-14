@@ -951,6 +951,27 @@ measurable rather than merely possible, and is what `wpt-js-gaps.js` measures. A
 evidence is genuinely not evidence of absence — say "no coverage", not "didn't ship", and
 point at Bugzilla for confirmation.
 
+## Changing this skill
+
+**Expect to change it rarely.** This file is approaching a thousand lines and a pass is required to
+read all of it, so every rule here is charged against every future run whether or not it applies. A
+miss is not automatically a missing rule: most are judgment calls that went the other way, and a
+paragraph per miss turns calibration into overfitting — the file grows, the reading gets more
+expensive, and the pass does not get better. Change it when a run reveals a *fundamental* error — a
+step skipped, a signal never looked at, something reported as verified that wasn't — not because a
+verdict went the other way.
+
+**A miss a tool can guard belongs in `selftest.js`, not here.** That file exists on the premise that
+prose does not fail, and it carries an order of magnitude more checks than the table in step 5 has
+rows. So when something is missed, the first question is which command could have caught it: write
+that check, and spend prose only on what no exit code can express. Exactly one row of that table is
+guarded by `nothing`, and it is the shape that genuinely needs prose — *read the assertion messages
+rather than trusting a matching name*, which is a judgment no assertion can make for you.
+
+**Don't edit this skill during a pass.** A pass produces notes; tuning the instrument competes with
+the reading, and an edit made mid-pass is written from inside the confusion it is meant to prevent.
+Collect what a run suggests, then apply it once the notes are written and `--verify` has passed.
+
 ## Reference
 
 - API docs: https://github.com/web-platform-tests/wpt.fyi/blob/main/api/README.md
