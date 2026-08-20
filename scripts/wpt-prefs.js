@@ -33,6 +33,7 @@ const { usage, num, unknownOption } = require('./lib/cli.js');
 const artifact = require('./lib/artifact.js');
 const { prefGatingLines } = require('./lib/render.js');
 const { analysePrefGating, matchPrefsToTests, discount, VERDICT_LABEL } = require('./lib/prefs.js');
+const { majorVersion } = require('./lib/shipped.js');
 const page = require('./lib/page.js');
 
 const fail = (msg) => usage(__filename, msg);
@@ -61,6 +62,9 @@ async function main() {
     const forward = changed.filter((r) => r.deltaPass > 0 || r.statusDirection === 'fixed');
     process.stderr.write(`Checking ${forward.length} forward-moving test(s) via searchfox...\n`);
     let g = await analysePrefGating(forward.map((r) => r.test), {
+      // Same reason as in wpt-collect.js: without the target version, mozilla-release (one
+      // version behind the beta train) vetoes prefs that were flipped on during this cycle.
+      targetVersion: majorVersion(report.after && report.after.browser_version),
       onProgress: (d, n) => process.stderr.write(`  ${d}/${n} directories\r`),
     });
     if (g.ok) g = matchPrefsToTests(g, changed);

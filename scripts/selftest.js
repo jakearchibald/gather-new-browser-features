@@ -1217,6 +1217,53 @@ Temporal
       ? null : `central-looks-shipped resolved to ${PR.verdictFor(per)}`;
   });
 
+  check('prefs: mozilla-release cannot veto a flip that landed in the beta cycle', () => {
+    // The real 155 signature. `layout.css.attr.enabled`, `progress-function`,
+    // `alpha-color-function`, `wasm_wide_arithmetic` and `http3.version_negotiation` all read
+    // central=true beta=true release=@IS_NIGHTLY_BUILD@ — because mozilla-release was still
+    // 154, so its gate answers a question about 154. The old classifier fell through to
+    // `if (gated) return 'nightly-only'` on the release entry and reported four of those five
+    // as not-in-155, contradicting the hand-checked verdict on the fifth.
+    const on = { nightly: true, shipped: true, raw: 'true', gated: false };
+    const gatedOld = { nightly: true, shipped: false, raw: '@IS_NIGHTLY_BUILD@', gated: true };
+    const per = { 'mozilla-central': on, 'mozilla-beta': on, 'mozilla-release': gatedOld };
+    const milestones = { 'mozilla-central': 156, 'mozilla-beta': 155, 'mozilla-release': 154 };
+
+    const naive = PR.verdictFor(per);
+    if (naive !== 'nightly-only') {
+      return `the un-targeted call should stay cautious, got ${naive}`;
+    }
+    const v = PR.verdictFor(per, { milestones, targetVersion: 155 });
+    if (v !== 'shipped') return `beta IS 155 and has it unconditionally, but got ${v}`;
+
+    // ...and the caution must survive: genuinely nightly-only means gated on BETA too.
+    const reallyNightly = {
+      'mozilla-central': gatedOld, 'mozilla-beta': gatedOld, 'mozilla-release': gatedOld,
+    };
+    const n = PR.verdictFor(reallyNightly, { milestones, targetVersion: 155 });
+    if (n !== 'nightly-only') return `gated on beta as well should stay nightly-only, got ${n}`;
+
+    // A target no shipped train holds (notes about nightly) must not become `unknown-pref`.
+    const ahead = PR.verdictFor(per, { milestones, targetVersion: 156 });
+    if (ahead === 'unknown-pref') return 'a target ahead of every shipped train lost its verdict';
+    return null;
+  });
+
+  check('prefs: shippedReposFor drops only the trains that are too old', () => {
+    const per = {
+      'mozilla-beta': { raw: 'beta' }, 'mozilla-release': { raw: 'release' },
+    };
+    const milestones = { 'mozilla-beta': 155, 'mozilla-release': 154 };
+    const at155 = PR.shippedReposFor(per, milestones, 155).map((i) => i.raw);
+    if (at155.join() !== 'beta') return `expected beta alone at 155, got [${at155}]`;
+    const at154 = PR.shippedReposFor(per, milestones, 154).map((i) => i.raw);
+    if (at154.join() !== 'beta,release') return `both trains hold >=154, got [${at154}]`;
+    // No milestone data must not silently change behaviour.
+    const blind = PR.shippedReposFor(per, null, null).map((i) => i.raw);
+    if (blind.join() !== 'beta,release') return `without milestones both are consulted, got [${blind}]`;
+    return null;
+  });
+
   check('prefs: "off in every channel" is not called nightly-only', () => {
     const off = { nightly: false, shipped: false, raw: 'false', gated: false };
     const v = PR.verdictFor({ 'mozilla-central': off, 'mozilla-beta': off, 'mozilla-release': off });

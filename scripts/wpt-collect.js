@@ -680,6 +680,10 @@ async function main() {
       .map((r) => r.test),
     {
       prefLists: prefLists.ok ? prefLists : null,
+      // The version being written about, so a repo holding an OLDER version is not allowed to
+      // veto. mozilla-release lags the beta train by one, and reading its gate as the answer
+      // for the beta version is what made four shipped 155 features read as nightly-only.
+      targetVersion: majorVersion(afterRun.browser_version),
       onProgress: (d, n) => process.stderr.write(`  ${d}/${n} directories\r`),
     },
   );

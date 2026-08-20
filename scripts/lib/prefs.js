@@ -5,9 +5,14 @@
  * ---------------
  * The skill's most-suggested comparison is `--from firefox@beta --to firefox@nightly`
  * ("what is coming next"), and that is precisely the comparison where *everything*
- * nightly-only shows up as newly passing. One real 155 pass led with three headline
- * features — `attr()`, `progress()` and `alpha()` — and all three are nightly-only. The
+ * nightly-only shows up as newly passing. One real pass led with three headline features —
+ * `attr()`, `progress()` and `alpha()` — which were nightly-only *at that time*, and the
  * notes presented them as shipped.
+ *
+ * Note the mirror-image error, which a later 155 pass then made in the other direction:
+ * all three had shipped by 155, and reading `mozilla-release` — one version behind the beta
+ * train — reported them nightly-only again. Both failures are the same mistake, which is
+ * asking a repo about a version it does not hold. See `shippedReposFor`.
  *
  * Two mechanisms combine to make that invisible, and neither is obvious:
  *
@@ -238,7 +243,9 @@ function ancestorsOf(testPath) {
  * anything fails the result says so, because "no nightly-only features found" and "the check
  * did not run" must never look the same.
  */
-async function analysePrefGating(tests, { concurrency = 8, onProgress, prefLists = null } = {}) {
+async function analysePrefGating(tests, {
+  concurrency = 8, onProgress, prefLists = null, targetVersion = null,
+} = {}) {
   const tool = prefLists ? prefLists.tool : await searchfoxVersion();
   if (!tool.present) {
     return {
@@ -258,6 +265,11 @@ async function analysePrefGating(tests, { concurrency = 8, onProgress, prefLists
         lists[repo] = parseStaticPrefList(text);
       }
     }
+    // Which version each repo holds, so a repo older than `targetVersion` can be excluded
+    // from the shipped-channel verdict. Cheap (3 calls) and cached, but only worth fetching
+    // when there is a target to compare against.
+    let milestones = prefLists && prefLists.milestones;
+    if (!milestones && targetVersion) milestones = await fetchMilestones();
 
     const dirs = [...new Set(tests.flatMap((t) => ancestorsOf(t)))].sort();
     let done = 0;
@@ -282,13 +294,15 @@ async function analysePrefGating(tests, { concurrency = 8, onProgress, prefLists
           const info = lists[repo].get(pref);
           per[repo] = info || null;
         }
-        prefs[pref] = { pref, per, verdict: verdictFor(per) };
+        prefs[pref] = { pref, per, verdict: verdictFor(per, { milestones, targetVersion }) };
       }
     }
     return {
       ok: true,
       checkedAt: new Date().toISOString(),
       tool,
+      milestones,
+      targetVersion,
       dirsProbed: dirs.length,
       forced: [...forced.entries()].map(([dir, names]) => ({ dir, prefs: names })),
       prefs,
@@ -296,6 +310,38 @@ async function analysePrefGating(tests, { concurrency = 8, onProgress, prefLists
   } catch (err) {
     return { ok: false, tool, error: String((err && err.message) || err) };
   }
+}
+
+/**
+ * The shipped-channel repos that can speak for the version being written about.
+ *
+ * A repo only describes the version it holds. When the notes are about 155, `mozilla-beta`
+ * IS 155 and `mozilla-release` is still 154 — so release's gate answers a question about
+ * 154 and must not be consulted. Without this, a pref flipped on during 155's cycle reads
+ * `central=true beta=true release=@IS_NIGHTLY_BUILD@` and the classifier's final
+ * `if (gated) return 'nightly-only'` fires on the *release* entry, calling a shipped
+ * feature nightly-only.
+ *
+ * That is not hypothetical: it is how one 155 pass filed `progress()`, `alpha()`, Wasm Wide
+ * Arithmetic and QUIC v2 as "not in 155" while correctly calling `attr()` shipped — four
+ * wrong verdicts from the same signature the reader had already reasoned past by hand for
+ * the fifth. Same evidence, opposite conclusions, which is the shape this whole module
+ * exists to prevent.
+ *
+ * With no milestone data, behaviour is unchanged: consult both, and stay cautious.
+ */
+function shippedReposFor(per, milestones, targetVersion) {
+  const names = ['mozilla-beta', 'mozilla-release'];
+  if (!milestones || !targetVersion) return names.map((n) => per[n]).filter(Boolean);
+  const relevant = names.filter((n) => {
+    const held = milestones[n];
+    return held == null || held >= targetVersion;
+  });
+  // Target is newer than every shipped train (e.g. notes about nightly): no shipped repo can
+  // answer, so fall back to consulting both rather than returning nothing, which would make
+  // `verdictFor` report `unknown-pref` for a pref that is plainly present.
+  if (!relevant.length) return names.map((n) => per[n]).filter(Boolean);
+  return relevant.map((n) => per[n]).filter(Boolean);
 }
 
 /**
@@ -311,9 +357,9 @@ async function analysePrefGating(tests, { concurrency = 8, onProgress, prefLists
  * Anything ambiguous resolves AWAY from `shipped`. The purpose is to stop a nightly-only
  * feature being presented as available, so caution has to be the failure direction.
  */
-function verdictFor(per) {
+function verdictFor(per, { milestones = null, targetVersion = null } = {}) {
   const central = per['mozilla-central'];
-  const shippedRepos = [per['mozilla-beta'], per['mozilla-release']].filter(Boolean);
+  const shippedRepos = shippedReposFor(per, milestones, targetVersion);
   if (!central && !shippedRepos.length) return 'unknown-pref';
   const all = [central, ...shippedRepos].filter(Boolean);
   const gated = all.some((i) => i.gated);
@@ -623,12 +669,26 @@ async function fetchMilestones() {
  * ahead of the beta branch, the flip landed inside that cycle and central is the evidence.
  */
 function verdictForBug(per, bug, milestones) {
-  const plain = verdictFor(per);
   const target = String(bug.milestone || '').match(/^(\d+)/);
   const beta = milestones && milestones['mozilla-beta'];
+  // Judge against the bug's own milestone, so a repo holding an older version is ignored
+  // rather than allowed to veto. This is what makes `central=true beta=true
+  // release=@IS_NIGHTLY_BUILD@` read as shipped for a 155 bug when beta IS 155.
+  const n = target ? Number(target[1]) : null;
+  const plain = verdictFor(per, { milestones, targetVersion: n });
   if (!target || !beta) return { verdict: plain, trainNote: null };
-  const n = Number(target[1]);
-  if (n <= beta) return { verdict: plain, trainNote: null };
+  if (n <= beta) {
+    if (plain !== 'shipped' || !milestones['mozilla-release']
+      || milestones['mozilla-release'] >= n) {
+      return { verdict: plain, trainNote: null };
+    }
+    return {
+      verdict: plain,
+      trainNote: `mozilla-release is still ${milestones['mozilla-release']}, so its gate `
+        + `describes ${milestones['mozilla-release']}, not ${n}; mozilla-beta IS ${n} and has `
+        + 'it unconditionally, i.e. the flip landed in this cycle',
+    };
+  }
   const central = per['mozilla-central'];
   // Platform-split first: `network.http.happy_eyeballs_enabled` is `@IS_NIGHTLY_BUILD@` on
   // Android and `true` elsewhere, so central is BOTH gated and shipping. Reading only `gated`
@@ -676,6 +736,7 @@ async function fetchPrefLists() {
 
 module.exports = {
   haveSearchfox, searchfoxVersion, parseStaticPrefList, parseDirIni, analysePrefGating, verdictFor,
+  shippedReposFor,
   prefsForTest, nightlyOnlyTests, ancestorsOf, discount, dirMarker, matchPrefsToTests,
   prefTokens, prefWords, words, prefsForBugs, fetchPrefLists, fetchMilestones, verdictForBug, VERDICT_LABEL, REPOS, CHANNEL_MACROS,
   GENERIC,

@@ -496,9 +496,18 @@ files either, and is not thereby discountable. No tests is a reason to go and fi
 
 This is not a nicety. The skill's most-suggested comparison is
 `--from firefox@beta --to firefox@nightly`, which is *exactly* where nightly-only features
-flood the diff — on one real 155 pass **967 of 1585 forward-moving tests were pref-gated**,
-and the notes led with `attr()`, `progress()` and `alpha()`, all three nightly-only, all three
-presented as shipped.
+flood the diff — on one real pass **967 of 1585 forward-moving tests were pref-gated**,
+and the notes led with `attr()`, `progress()` and `alpha()`, all three nightly-only at the
+time, all three presented as shipped.
+
+**The same three later caused the mirror-image error, so do not read that as a standing
+verdict on them.** By 155 all three had shipped, and a release-to-release pass called them
+nightly-only again — because `mozilla-release` is one version *behind* the beta train, so its
+`@IS_NIGHTLY_BUILD@` answers a question about the previous release. The signature to know is
+`central=true beta=true release=@IS_NIGHTLY_BUILD@`, which means **flipped on during this
+cycle, i.e. shipped**. `wpt-prefs.js` is now version-aware and resolves it correctly, and
+`selftest.js` guards both directions — so trust the marker rather than re-deriving it, and if
+you do check by hand, read `mozilla-beta`, not `mozilla-release`.
 
 Two mechanisms hide it, and neither is visible in a pass rate:
 
